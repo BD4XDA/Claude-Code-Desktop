@@ -1,13 +1,54 @@
 import http from "node:http";
+import { randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join, relative as relativePath, resolve, sep } from "node:path";
+import { delimiter, dirname, join, relative as relativePath, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HOST = "127.0.0.1";
 const PORT = 4318;
 const BRIDGE_PROTOCOL = 2;
+// 桥接鉴权：宿主（vite 插件 / run-vinext）与独立桥接进程共享同一随机 token，
+// 通过状态文件 %LOCALAPPDATA%\ClaudeCodeWhite\bridge-token 交换；页面启动时从
+// 豁免端点 /bridge-token.json 换取 token，之后所有请求携带 X-Bridge-Token。
+// 自定义头强制浏览器先发 preflight（远程恶意网站被 CORS 拒绝），值校验挡住本机
+// 任意 localhost 页面的直读。OPTIONS 与 /api/status、/api/bridge/start、
+// /bridge-token.json 豁免，供启动器健康检查、前端就绪探测与 token 引导使用。
+const STATE_DIR = process.env.LOCALAPPDATA
+  ? join(process.env.LOCALAPPDATA, "ClaudeCodeWhite")
+  : join(homedir(), ".claude-code-white");
+const TOKEN_FILE = join(STATE_DIR, "bridge-token");
+const TOKEN_EXEMPT_PATHS = new Set(["/api/status", "/api/bridge/start", "/bridge-token.json"]);
+let cachedToken = "";
+
+function bridgeToken() {
+  if (cachedToken) return cachedToken;
+  if (process.env.BRIDGE_TOKEN) { cachedToken = process.env.BRIDGE_TOKEN; return cachedToken; }
+  try {
+    if (existsSync(TOKEN_FILE)) {
+      const saved = readFileSync(TOKEN_FILE, "utf8").trim();
+      if (saved) { cachedToken = saved; return saved; }
+    }
+    cachedToken = randomBytes(24).toString("hex");
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(TOKEN_FILE, cachedToken, "utf8");
+  } catch { /* 持久化失败时仅用内存 token，鉴权仍然生效 */ }
+  return cachedToken;
+}
+
+// /api/run 简单限流：每分钟最多 24 次会话启动，防止本机恶意页面耗尽订阅额度。
+const RUN_WINDOW_MS = 60_000;
+const RUN_MAX = 24;
+let runTimestamps = [];
+
+function rateLimitRun() {
+  const now = Date.now();
+  runTimestamps = runTimestamps.filter((t) => now - t < RUN_WINDOW_MS);
+  if (runTimestamps.length >= RUN_MAX) return false;
+  runTimestamps.push(now);
+  return true;
+}
 const ALLOWED_MODELS = new Set(["sonnet", "opus", "haiku"]);
 const ALLOWED_PERMISSION_MODES = new Set(["plan", "manual", "acceptEdits", "auto", "dontAsk"]);
 const ALLOWED_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -96,7 +137,7 @@ function corsHeaders(origin) {
   const allowed = origin && LOCAL_ORIGIN.test(origin) ? origin : "http://localhost:3000";
   return {
     "Access-Control-Allow-Origin": allowed,
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, X-Bridge-Token",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Vary": "Origin",
   };
@@ -632,6 +673,18 @@ async function handleRequest(request, response) {
   const origin = request.headers.origin || "";
   if (request.method === "OPTIONS") { response.writeHead(204, corsHeaders(origin)); response.end(); return; }
   const url = new URL(request.url || "/", `http://${HOST}:${PORT}`);
+
+  // 除健康检查端点外，一律要求 X-Bridge-Token 与状态文件 token 一致。
+  if (!TOKEN_EXEMPT_PATHS.has(url.pathname) && request.headers["x-bridge-token"] !== bridgeToken()) {
+    sendJson(response, 403, { error: "桥接鉴权失败：缺少或错误的 X-Bridge-Token" }, origin);
+    return;
+  }
+
+  // 页面启动时凭此端点换取 token（豁免鉴权：先有 token 才能带 token）。
+  if (request.method === "GET" && url.pathname === "/bridge-token.json") {
+    sendJson(response, 200, { token: bridgeToken() }, origin);
+    return;
+  }
 
   if (request.method === "GET" && url.pathname === "/api/status") {
     const claudePath = findClaude();

@@ -93,11 +93,41 @@ let BRIDGE_BASE = "http://127.0.0.1:4318";
 async function probeBridgeBase() {
   try {
     const response = await fetch("/api/status", { signal: AbortSignal.timeout(1200) });
-    if (response.ok) { BRIDGE_BASE = ""; return true; }
+    if (response.ok) { BRIDGE_BASE = ""; await ensureBridgeToken(); return true; }
   } catch { /* 同源无桥接时回退独立端口 */ }
   return false;
 }
 function api(path: string) { return `${BRIDGE_BASE}${path}`; }
+// 桥接鉴权：页面先从豁免端点 /bridge-token.json 换取 token，之后所有请求携带 X-Bridge-Token。
+// 服务端 token 轮换（状态文件被删/重建）时自动重取一次并重试，无需手动刷新页面。
+let BRIDGE_TOKEN = "";
+async function ensureBridgeToken() {
+  if (BRIDGE_TOKEN) return true;
+  try {
+    const response = await fetch(api("/bridge-token.json"), { signal: AbortSignal.timeout(1500) });
+    if (response.ok) {
+      const payload = await response.json();
+      if (payload && typeof payload.token === "string" && payload.token) {
+        BRIDGE_TOKEN = payload.token;
+        return true;
+      }
+    }
+  } catch { /* 桥接未就绪时静默，等下一次就绪探测时重试 */ }
+  return false;
+}
+async function apiFetch(path: string, init: RequestInit = {}) {
+  const withToken = async () => {
+    const headers = new Headers(init.headers);
+    if (BRIDGE_TOKEN) headers.set("X-Bridge-Token", BRIDGE_TOKEN);
+    return fetch(api(path), { ...init, headers });
+  };
+  let response = await withToken();
+  if (response.status === 403 && BRIDGE_TOKEN) {
+    BRIDGE_TOKEN = "";
+    if (await ensureBridgeToken()) response = await withToken();
+  }
+  return response;
+}
 const welcome: Message = {
   id: "welcome",
   role: "assistant",
@@ -399,7 +429,7 @@ export default function Home() {
     void (async () => {
       await probeBridgeBase();
       try {
-        const response = await fetch(api("/api/status"));
+        const response = await apiFetch("/api/status");
         applyStatus(await response.json());
       } catch { applyStatus({ bridge: false, claudeInstalled: false }); }
     })();
@@ -434,7 +464,7 @@ export default function Home() {
     setHistoryOpen(true);
     setHistoryLoading(true);
     try {
-      const response = await fetch(api("/api/sessions"));
+      const response = await apiFetch("/api/sessions");
       const payload = await response.json().catch(() => null) as { sessions?: HistorySession[] } | null;
       setHistorySessions(response.ok ? payload?.sessions || [] : []);
     } catch { setHistorySessions([]); }
@@ -444,7 +474,7 @@ export default function Home() {
   async function restoreHistorySession(summary: HistorySession) {
     setRestoringSessionId(summary.id);
     try {
-      const response = await fetch(api(`/api/sessions/detail?projectId=${encodeURIComponent(summary.projectId)}&sessionId=${encodeURIComponent(summary.id)}`));
+      const response = await apiFetch(`/api/sessions/detail?projectId=${encodeURIComponent(summary.projectId)}&sessionId=${encodeURIComponent(summary.id)}`);
       const detail = await response.json().catch(() => null) as (HistoryDetail & { error?: string }) | null;
       if (!response.ok || !detail) throw new Error(detail?.error || "无法恢复任务");
       const id = `session-restored-${Date.now()}`;
@@ -463,7 +493,7 @@ export default function Home() {
     if (!status.bridge) return;
     setChangesLoading(true);
     try {
-      const response = await fetch(api(`/api/workspace/changes?path=${encodeURIComponent(path)}`));
+      const response = await apiFetch(`/api/workspace/changes?path=${encodeURIComponent(path)}`);
       const next = response.ok ? await response.json() as WorkspaceChanges : null;
       setChanges(next);
       setSelectedChange((current) => current && next?.entries.some((entry) => entry.path === current) ? current : null);
@@ -478,7 +508,7 @@ export default function Home() {
     setDiffError("");
     setDiffLoading(true);
     try {
-      const response = await fetch(api(`/api/workspace/diff?path=${encodeURIComponent(path)}&file=${encodeURIComponent(entry.path)}&status=${encodeURIComponent(entry.status)}`));
+      const response = await apiFetch(`/api/workspace/diff?path=${encodeURIComponent(path)}&file=${encodeURIComponent(entry.path)}&status=${encodeURIComponent(entry.status)}`);
       const payload = await response.json().catch(() => null) as (DiffPayload & { error?: string }) | null;
       if (!response.ok || !payload) throw new Error(payload?.error || "无法读取 Diff");
       setDiffPreview(payload);
@@ -490,7 +520,7 @@ export default function Home() {
     setExpandedDirs((current) => { const next = new Set(current); next.add(dir); return next; });
     setTreeLoadingDir(dir);
     try {
-      const response = await fetch(api(`/api/workspace/tree?path=${encodeURIComponent(path)}&dir=${encodeURIComponent(dir)}`));
+      const response = await apiFetch(`/api/workspace/tree?path=${encodeURIComponent(path)}&dir=${encodeURIComponent(dir)}`);
       if (response.ok) {
         const payload = await response.json() as TreePayload;
         setTreeCache((current) => ({ ...current, [dir]: payload.entries }));
@@ -508,7 +538,7 @@ export default function Home() {
     setFilePreviewLoading(true);
     setFilePreview(null);
     try {
-      const response = await fetch(api(`/api/workspace/file?path=${encodeURIComponent(path)}&file=${encodeURIComponent(file)}`));
+      const response = await apiFetch(`/api/workspace/file?path=${encodeURIComponent(path)}&file=${encodeURIComponent(file)}`);
       if (response.ok) setFilePreview(await response.json());
     } catch { /* 读取失败时忽略 */ }
     finally { setFilePreviewLoading(false); }
@@ -516,7 +546,7 @@ export default function Home() {
 
   const refreshLogs = useCallback(async () => {
     try {
-      const response = await fetch(api("/api/logs"));
+      const response = await apiFetch("/api/logs");
       if (response.ok) { const payload = await response.json() as { logs: BridgeLogEntry[] }; setLogs(payload.logs || []); }
     } catch { /* 桥接器未启动时忽略 */ }
   }, []);
@@ -525,7 +555,7 @@ export default function Home() {
     if (!status.bridge) return;
     setMemoriesLoading(true);
     try {
-      const response = await fetch(api("/api/memory"));
+      const response = await apiFetch("/api/memory");
       setMemories(response.ok ? await response.json() as MemoryPayload : null);
     } catch { setMemories(null); }
     finally { setMemoriesLoading(false); }
@@ -533,7 +563,7 @@ export default function Home() {
 
   async function loadMemoryWorkspaces() {
     try {
-      const response = await fetch(api("/api/memory/workspaces"));
+      const response = await apiFetch("/api/memory/workspaces");
       if (response.ok) {
         const payload = await response.json() as { workspaces: MemoryWorkspaceOption[] };
         setMemoryWorkspaces(payload.workspaces || []);
@@ -550,7 +580,7 @@ export default function Home() {
     setMemoryForm({ open: true, workspaceId, name: entry.name, description: entry.description, type: entry.type, body: entry.body, editingFile: entry.file, saving: false });
     // 列表里的正文是截断预览，编辑时拉取完整内容
     try {
-      const response = await fetch(api(`/api/memory/file?workspaceId=${encodeURIComponent(workspaceId)}&file=${encodeURIComponent(entry.file)}`));
+      const response = await apiFetch(`/api/memory/file?workspaceId=${encodeURIComponent(workspaceId)}&file=${encodeURIComponent(entry.file)}`);
       if (response.ok) {
         const payload = await response.json() as { content: string };
         const match = payload.content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
@@ -566,7 +596,7 @@ export default function Home() {
     if (!form.workspaceId || !form.name.trim()) return;
     setMemoryForm((current) => ({ ...current, saving: true }));
     try {
-      const response = await fetch(api("/api/memory"), {
+      const response = await apiFetch("/api/memory", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           workspaceId: form.workspaceId,
@@ -591,7 +621,7 @@ export default function Home() {
   async function removeMemory(workspaceId: string, entry: MemoryEntry) {
     if (!window.confirm(`删除记忆「${entry.name}」？${entry.file} 会从本机移除。`)) return;
     try {
-      await fetch(api(`/api/memory?workspaceId=${encodeURIComponent(workspaceId)}&file=${encodeURIComponent(entry.file)}`), { method: "DELETE" });
+      await apiFetch(`/api/memory?workspaceId=${encodeURIComponent(workspaceId)}&file=${encodeURIComponent(entry.file)}`, { method: "DELETE" });
       await loadMemories();
     } catch { /* 桥接未连接时忽略 */ }
   }
@@ -653,7 +683,7 @@ export default function Home() {
   async function recheckStatus() {
     await probeBridgeBase();
     try {
-      const response = await fetch(api("/api/status"));
+      const response = await apiFetch("/api/status");
       applyStatus(await response.json());
     } catch { applyStatus({ bridge: false, claudeInstalled: false }); }
   }
@@ -673,6 +703,7 @@ export default function Home() {
         if (response.ok) {
           BRIDGE_BASE = "http://127.0.0.1:4318";
           applyStatus(await response.json());
+          await ensureBridgeToken();
           setBridgeStarting(false);
           return;
         }
@@ -810,7 +841,7 @@ export default function Home() {
     const toolIndexById = new Map<string, number>();
     let aborted = false;
     try {
-      const response = await fetch(api("/api/run"), {
+      const response = await apiFetch("/api/run", {
         method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
         body: JSON.stringify({ prompt, cwd: projectPath, model: current.model, permissionMode: current.permissionMode, effort: current.effort, sessionId: current.claudeSessionId, requestId: id }),
       });
@@ -896,15 +927,15 @@ export default function Home() {
 
   function stopSession(id: string) {
     aborters.current.get(id)?.abort();
-    fetch(api("/api/cancel"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requestId: id }) }).catch(() => undefined);
+    apiFetch("/api/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requestId: id }) }).catch(() => undefined);
   }
 
   async function refreshUsage() {
     setUsageLoading(true);
     try {
       const [providerResponse, analyticsResponse] = await Promise.all([
-        fetch(api("/api/usage")),
-        fetch(api("/api/usage/deepseek")),
+        apiFetch("/api/usage"),
+        apiFetch("/api/usage/deepseek"),
       ]);
       const payload = await providerResponse.json();
       setProviders(payload.providers || []);
