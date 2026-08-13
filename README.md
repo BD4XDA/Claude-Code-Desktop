@@ -1,10 +1,15 @@
-# Claude Code Desktop
+# Claude Code Desktop ｜ Claude Code White
 
 Claude Code Desktop 是一个面向本地 Claude Code CLI 的双主题桌面前端。浅色版使用更清透的中性纸白，深色版使用中性炭黑，并以 Claude 的珊瑚橙保留品牌温度；交互参考 Claude Desktop 的并行会话设计，同时保留 Codex 式项目、工具、终端、变更和权限工作流。
 
-界面针对高分辨率桌面显示器优化阅读尺度，品牌标题采用具有人文编辑感的衬线字体，正文与代码分别使用清晰的无衬线和等宽字体。
+Claude Code White is a dual-theme desktop frontend for your local Claude Code CLI — light paper-white and dark carbon-black, with Claude coral as the brand accent. It borrows the parallel-session design of Claude Desktop while keeping the Codex-style project, tool, terminal, change and permission workflows.
 
-## 当前能力
+界面针对高分辨率桌面显示器优化阅读尺度，品牌标题采用具有人文编辑感的衬线字体，正文与代码分别使用清晰的无衬线和等宽字体。
+Typography is tuned for high-resolution desktop displays: a humanist serif for the brand title, clear sans-serif for body text and monospace for code.
+
+---
+
+## 当前能力 Features
 
 - 自动检测本机 `claude` 命令与版本（PATH / npm 全局 / 原生安装 / WinGet 均支持）
 - 通过官方 headless 模式调用：`claude -p --output-format stream-json --verbose`
@@ -22,9 +27,28 @@ Claude Code Desktop 是一个面向本地 Claude Code CLI 的双主题桌面前�
 - 桥接未就绪时顶栏「一键桥接」可直接拉起本地桥接进程
 - 左下角“用量与额度”中心：Claude 本机会话统计、DeepSeek 余额、Anthropic / OpenAI 组织成本、Gemini 官方控制台入口
 
-## 启动
+- Auto-detects your local `claude` binary and version (PATH / npm global / native install / WinGet)
+- Drives the official headless mode: `claude -p --output-format stream-json --verbose`
+- 1–3 Claude Code sessions streaming side by side; drag to reorder, stop independently
+- Each pane keeps its own session ID, project directory, model and permission mode; rename, delete, auto-title
+- Search and resume local Claude Code history — original session context, directory and model
+- `Ctrl+Shift+P` command palette: new/resume tasks, open changes/files/logs/memory, toggle inspector & theme
+- Light/dark theme with per-device session restore
+- Sonnet / Opus / Haiku model switching
+- Codex-style approval policies: plan-only / ask / auto-edit edits / smart / never (limited), saved per session
+- Thinking level switchable any time: quick / normal / deep / extreme / max — passed as real `--effort`; changes apply from the next reasoning turn
+- Codex-style flow view: shows the current step live; results collapse into lightweight summaries, expandable per answer (steps, tool inputs, outputs)
+- Inspector panel: real Git changes, clickable per-file diffs (added/removed lines colored), expandable file tree with preview, live bridge logs, local memory
+- Memory panel grouped by workspace and type (user / feedback / project / reference); create, edit, delete directly under `~/.claude/projects/<workspace>/memory/` with auto-maintained index
+- One-click bridge in the top bar when the bridge is not ready
+- Usage & quota center (bottom-left): local Claude session stats, DeepSeek balance, Anthropic / OpenAI org costs, Gemini console entry
+
+---
+
+## 启动 Getting Started
 
 桥接器已内置在开发服务器中（`bridge/vite-plugin.mjs`），一条命令即同时提供前端与本地桥接 API：
+The bridge is built into the dev server (`bridge/vite-plugin.mjs`) — one command serves both the frontend and the local bridge API:
 
 ```powershell
 npm run dev
@@ -32,41 +56,51 @@ npm run dev
 
 推荐直接双击桌面的「Claude Code White」快捷方式，或项目里的「打开 Claude Code White.vbs」：无控制台启动器会静默复用健康实例，或自动寻找可用端口、启动本地服务、等待连接成功，再以 Chrome 应用窗口打开。整个过程不会弹出黑色命令窗口；第一次运行若缺少依赖，会自动准备。
 
+Or just double-click the desktop shortcut or `打开 Claude Code White.vbs` in the project: the silent launcher reuses a healthy instance, or starts one on a free port, waits until ready, then opens a Chrome app window — no console window, auto-installs missing dependencies on first run.
+
 要重新创建桌面的一键启动快捷方式：
+To (re)create the one-click desktop shortcuts:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\create-shortcut.ps1
 ```
 
 也可以在 PowerShell 中直接运行同一个一键启动器：
+Or run the same launcher directly from PowerShell:
 
 ```powershell
 & '.\Start-Claude-Code-White.ps1'
 ```
 
-### 管理员模式（桌面快捷方式）
+### 管理员模式 Admin mode
 
 需要以管理员身份运行时（dev server、本地桥接与所有 Claude Code CLI 子进程都获得管理员权限），在项目目录执行：
+If you need admin rights (dev server, local bridge and every spawned Claude Code CLI child inherit them), run from the project directory:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\create-shortcut.ps1
 ```
 
 会在桌面创建「Claude Code White（管理员）」快捷方式（带 UAC 提权标志）：双击后确认 UAC，自动以管理员身份运行 `npm run dev`。桌面上已有的同款快捷方式可直接双击使用。
+This creates a 「Claude Code White (Admin)」 shortcut with a UAC elevation flag: double-click, confirm UAC, and it runs `npm run dev` as administrator. Existing shortcuts keep working.
 
 如果本机尚未安装 Claude Code，先按照 Anthropic 官方说明安装并完成登录（支持 npm 全局、原生安装与 WinGet 三种安装位置）。前端不会收集或保存 API Key，认证完全交给 Claude Code 自身管理。
+If Claude Code is not installed yet, install and sign in per Anthropic's official docs (npm global, native install or WinGet all supported). The frontend never collects or stores API keys — authentication is entirely managed by Claude Code itself.
 
-生产模式（构建产物）：`npm run start` 会自动拉起本地桥接（监听 127.0.0.1:4318），
-一条命令即可使用；页面左上角也有「一键桥接」按钮，桥接未就绪时点击即可拉起：
+生产模式（构建产物）：`npm run start` 会自动拉起本地桥接（监听 127.0.0.1:4318），一条命令即可使用；页面左上角也有「一键桥接」按钮，桥接未就绪时点击即可拉起：
+Production mode (built artifacts): `npm run start` automatically starts the local bridge (listening on 127.0.0.1:4318). There's also a one-click bridge button in the top-left of the page:
 
 ```powershell
 npm run build
-npm run start    # 前端页面 + 自动启动本地桥接；页面回退到独立桥接端口
+npm run start    # frontend + auto-start local bridge; page falls back to the standalone bridge port
 ```
 
-## 用量供应商（可选）
+---
+
+## 用量供应商（可选）Usage providers (optional)
 
 在启动 PowerShell 的用户环境中设置下列变量即可启用对应检测器；密钥只由监听 `127.0.0.1` 的本地桥读取，不会返回给网页：
+Set these variables in the environment of the launching PowerShell to enable the corresponding detectors; keys are read only by the local bridge on `127.0.0.1` and never returned to the page:
 
 ```powershell
 $env:DEEPSEEK_API_KEY = '...'
@@ -77,11 +111,15 @@ $env:GEMINI_API_KEY = '...'
 ```
 
 Anthropic 的 Usage & Cost API 只适用于组织 Admin API key，不能查询个人 Claude Pro / Max 订阅剩余额度。Gemini 普通 API key 也没有余额查询接口，因此界面会跳转到官方 AI Studio 用量页。
+Anthropic's Usage & Cost API only works with organization Admin API keys — it cannot query personal Claude Pro/Max plan quotas. Gemini API keys have no balance endpoint either, so the UI links to the official AI Studio usage page instead.
 
-## 结构
+---
 
-- `app/`：浅色 / 深色双主题、多会话工作区与用量中心
-- `bridge/server.mjs`：仅监听 `127.0.0.1` 的本地 CLI 适配器
-- `scripts/run-vinext.mjs`：跨平台开发与构建入口
+## 结构 Structure
+
+- `app/`：浅色 / 深色双主题、多会话工作区与用量中心 — dual-theme, multi-session workspace & usage center
+- `bridge/server.mjs`：仅监听 `127.0.0.1` 的本地 CLI 适配器 — local CLI adapter bound to `127.0.0.1` only
+- `scripts/run-vinext.mjs`：跨平台开发与构建入口 — cross-platform dev & build entry
 
 本项目默认仅供本机使用，不应将本地桥暴露到公网。
+This project is meant for local use only — never expose the local bridge to the public internet.
