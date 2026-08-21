@@ -43,6 +43,8 @@ test("keeps the local bridge narrow and Claude Code-specific", async () => {
   assert.match(page, /批准策略/);
   assert.match(page, /思考强度/);
   assert.match(page, /查看流程详情/);
+  assert.match(page, /收起流程/);
+  assert.match(css, /\.process-collapse-footer/i);
   assert.match(page, /processOpen:\s*false/);
   assert.match(page, /keepOnlyOneControlOpen/);
   assert.match(page, /function ClaudeSettingsControl/);
@@ -115,6 +117,10 @@ test("keeps the local bridge narrow and Claude Code-specific", async () => {
   assert.match(bridge, /control_response/);
   assert.match(bridge, /acknowledged:\s*true/);
   assert.match(page, /已立即调整方向/);
+  assert.match(page, /steer-user-/);
+  assert.match(page, /steer-assistant-/);
+  assert.match(page, /activeAssistantIdsRef/);
+  assert.match(page, /Claude Code 已接收插入消息/);
   assert.match(bridge, /select-workspace-folder\.vbs/);
   assert.match(bridge, /spawn\("wscript\.exe"/);
   assert.doesNotMatch(bridge, /-32000/);

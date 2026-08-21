@@ -345,6 +345,7 @@ function ProcessFlow({ message, onToggle }: { message: Message; onToggle: () => 
         {tool.input && tool.input !== "{}" && <pre className="tool-input">{tool.input.slice(0, 4000)}</pre>}
         {tool.result && <pre className={`tool-result ${tool.state === "error" ? "fail" : ""}`}>{tool.result.slice(0, 6000)}</pre>}
       </details>)}</div>}
+      <footer className="process-collapse-footer"><button type="button" onClick={onToggle}>收起流程 <span aria-hidden="true">⌃</span></button></footer>
     </div>}
   </section>;
 }
@@ -446,6 +447,7 @@ export default function Home() {
   const [hydrated, setHydrated] = useState(false);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const aborters = useRef(new Map<string, AbortController>());
+  const activeAssistantIdsRef = useRef(new Map<string, string>());
   const conversationRefs = useRef(new Map<string, HTMLDivElement | null>());
   const stickToBottomRef = useRef(new Map<string, boolean>());
   const usageDragRef = useRef<{ startX: number; startProgress: number; progress: number; travel: number; moved: boolean; left: number; width: number } | null>(null);
@@ -1171,6 +1173,7 @@ export default function Home() {
     const titleSource = prompt || `分析 ${images.length} 张图片`;
     const autoTitle = current.title.startsWith("新任务") ? (titleSource.length > 22 ? `${titleSource.slice(0, 22)}…` : titleSource) : null;
     const messageImages = images.map(({ id: imageId, name, mediaType, dataUrl }) => ({ id: imageId, name, mediaType, dataUrl }));
+    activeAssistantIdsRef.current.set(id, assistantId);
     if (!preserveDraft) {
       setDraftImages((all) => ({ ...all, [id]: [] }));
       setImageNotices((all) => ({ ...all, [id]: "" }));
@@ -1186,6 +1189,7 @@ export default function Home() {
         ...message, body: "本地桥接尚未就绪。请通过启动脚本打开应用，并确认 Claude Code 已登录。", processOpen: false,
         timeline: [{ kind: "result", title: "等待本地连接", detail: "没有执行命令或写入文件", state: "done" }],
       } : message) }));
+      activeAssistantIdsRef.current.delete(id);
       return;
     }
 
@@ -1210,8 +1214,9 @@ export default function Home() {
         for (const line of lines) {
           if (!line.trim()) continue;
           const normalized = normalizeEvent(JSON.parse(line));
+          const targetAssistantId = activeAssistantIdsRef.current.get(id) || assistantId;
           patchSession(id, (session) => {
-            let tools = session.messages.find((item) => item.id === assistantId)?.tools || [];
+            let tools = session.messages.find((item) => item.id === targetAssistantId)?.tools || [];
             // 追加新的工具调用（tool_use），记录 id → 下标
             if (normalized.tools) {
               for (const tool of normalized.tools) {
@@ -1237,7 +1242,7 @@ export default function Home() {
                 cache: session.usage.cache + (normalized.usage.cache || 0),
                 cost: Math.max(session.usage.cost, normalized.usage.cost || 0),
               } : session.usage,
-              messages: session.messages.map((message) => message.id === assistantId ? {
+              messages: session.messages.map((message) => message.id === targetAssistantId ? {
                 ...message,
                 body: normalized.text ? `${message.body}${normalized.text}` : message.body,
                 timeline: normalized.timeline ? [...(message.timeline || []), normalized.timeline] : message.timeline,
@@ -1259,14 +1264,16 @@ export default function Home() {
     } catch (error) {
       const text = error instanceof Error && error.name === "AbortError" ? "任务已停止。" : `连接失败：${error instanceof Error ? error.message : String(error)}`;
       aborted = error instanceof Error && error.name === "AbortError";
-      patchSession(id, (session) => ({ ...session, messages: session.messages.map((message) => message.id === assistantId ? { ...message, body: message.body || text } : message) }));
+      const targetAssistantId = activeAssistantIdsRef.current.get(id) || assistantId;
+      patchSession(id, (session) => ({ ...session, messages: session.messages.map((message) => message.id === targetAssistantId ? { ...message, body: message.body || text } : message) }));
     } finally {
       aborters.current.delete(id);
+      const targetAssistantId = activeAssistantIdsRef.current.get(id) || assistantId;
       // 流结束时收尾仍在执行中的工具卡片（正常结束=done，中断=error），并记录本次任务耗时
       patchSession(id, (session) => ({
         ...session,
         sending: false,
-        messages: session.messages.map((message) => message.id === assistantId
+        messages: session.messages.map((message) => message.id === targetAssistantId
           ? {
               ...message,
               elapsedMs: Date.now() - startedAt,
@@ -1275,6 +1282,7 @@ export default function Home() {
             }
           : message),
       }));
+      activeAssistantIdsRef.current.delete(id);
     }
   }
 
@@ -1328,7 +1336,36 @@ export default function Home() {
       });
       const payload = await response.json().catch(() => null) as { steered?: boolean; acknowledged?: boolean; error?: string } | null;
       if (!response.ok || !payload?.steered || !payload.acknowledged) throw new Error(payload?.error || "Claude Code 未确认调整方向");
-      patchSession(sessionId, (current) => ({ ...current, messages: current.messages.map((message) => message.role === "assistant" && message.processOpen ? { ...message, timeline: [...(message.timeline || []), { kind: "thinking", title: "已立即调整方向", detail: turn.body || `已接收 ${turn.images.length} 张图片`, state: "done" }] } : message) }));
+      const insertedUserId = `steer-user-${turn.id}`;
+      const continuationAssistantId = `steer-assistant-${turn.id}`;
+      const insertedImages = turn.images.map(({ id: imageId, name, mediaType, dataUrl }) => ({ id: imageId, name, mediaType, dataUrl }));
+      patchSession(sessionId, (current) => {
+        if (current.messages.some((message) => message.id === insertedUserId)) return current;
+        const activeAssistantId = activeAssistantIdsRef.current.get(sessionId)
+          || [...current.messages].reverse().find((message) => message.role === "assistant" && message.processOpen)?.id;
+        const closedMessages = current.messages.map((message) => message.id === activeAssistantId ? {
+          ...message,
+          processOpen: false,
+          timeline: [...(message.timeline || []), { kind: "result" as const, title: "已立即调整方向", detail: turn.body || `已接收 ${turn.images.length} 张图片`, state: "done" as const }],
+          tools: message.tools?.map((tool) => tool.state === "running" ? { ...tool, state: "done" as const, result: tool.result || "已根据新消息调整方向" } : tool),
+        } : message);
+        return {
+          ...current,
+          messages: [
+            ...closedMessages,
+            { id: insertedUserId, role: "user" as const, body: turn.body, images: insertedImages },
+            {
+              id: continuationAssistantId,
+              role: "assistant" as const,
+              body: "",
+              processOpen: true,
+              timeline: [{ kind: "thinking" as const, title: "按新消息继续", detail: "Claude Code 已接收插入消息", state: "running" as const }],
+            },
+          ],
+        };
+      });
+      // 后续流式事件写入新的回复段，保证“旧回复 → 插入消息 → 新回复”的可读顺序。
+      activeAssistantIdsRef.current.set(sessionId, continuationAssistantId);
       removeQueuedTurn(sessionId, turnId);
       setImageNotices((current) => ({ ...current, [sessionId]: "" }));
     } catch (error) {
