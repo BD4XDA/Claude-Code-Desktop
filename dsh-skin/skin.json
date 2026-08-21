@@ -1,0 +1,25 @@
+{
+  "id": "claude-code-white",
+  "name": "Claude Code White",
+  "nameEn": "Claude Code White",
+  "author": "Claude Code White",
+  "tagline": "珊瑚橙 · 暖白 · Geist 字形 · Claude Code 桌面风格",
+  "description": "移植自 Claude-Code-White 工作区的前端风格：暖白画布配珊瑚橙主色，Geist / Geist Mono 字形（内嵌），浅色默认、深色跟随系统；应用容器带圆角与阴影的桌面质感，页面背景铺 32px 点阵网格。仅改变外观，不触碰任何功能。",
+  "tags": [
+    "claude",
+    "ccw",
+    "coral",
+    "warm",
+    "minimal",
+    "geist"
+  ],
+  "accent": "#d97757",
+  "bodyAttr": "data-dsh-claude-code-white",
+  "package": "@linxin666/dsh-client-ui-skin-claude-code-white",
+  "wiring": {
+    "id": "ui-skin-claude-code-white",
+    "bundleWired": false
+  },
+  "preview": {},
+  "order": 10
+}

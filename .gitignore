@@ -18,6 +18,9 @@
 /.vinext/
 /out/
 
+# vite 缓存
+/.vite/
+
 # misc
 .DS_Store
 *.pem

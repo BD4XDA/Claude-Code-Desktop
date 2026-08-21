@@ -1,0 +1,31 @@
+{
+  "name": "@linxin666/dsh-client-ui-skin-claude-code-white",
+  "version": "0.1.0",
+  "description": "Claude Code White skin for DeepSeek Harness — 移植自 Claude-Code-White 工作区的前端风格（珊瑚橙 × 暖白 × Geist 字形），仅改外观，功能不变。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "license": "MIT",
+  "files": [
+    "lib",
+    "skin.json",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "sync": "node sync-to-dsh.mjs"
+  }
+}

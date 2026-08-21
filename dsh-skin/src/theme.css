@@ -1,0 +1,325 @@
+/* ============================================================================
+   Claude Code White — dsh 皮肤主题
+   移植自 D:\code\Claude-Code-White\app\globals.css 的设计 token（浅色/深色两套）
+   覆盖 dsh 的 --dsw-static-* 静态色板与 --dsw-alias-* 别名层，作用于
+   body[data-dsh-claude-code-white] 作用域；深色跟随 dsh 的
+   data-ds-dark-theme 切换（浅色为 CCW 默认）。
+   ============================================================================ */
+
+{{FONTS}}
+
+/* ---------- 页面级：暖白画布 + 32px 点阵网格（CCW 会话区底纹） ---------- */
+body[data-dsh-claude-code-white] {
+  background-color: #f8f9fa;
+  background-image: linear-gradient(rgba(91, 96, 105, .042) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(91, 96, 105, .042) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+body[data-dsh-claude-code-white][data-ds-dark-theme] {
+  background-color: #18191b;
+  background-image: linear-gradient(rgba(228, 232, 240, .03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(228, 232, 240, .03) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+/* 应用容器：桌面应用质感（圆角 + 细边框 + 阴影），93% 不透明度透出网格 */
+body[data-dsh-claude-code-white] [id=root] {
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) 93%, transparent);
+  border-radius: 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  box-shadow: 0 18px 48px rgba(37, 40, 46, .085);
+  overflow: hidden;
+}
+
+/* 焦点态 / 选区（CCW 珊瑚橙描边） */
+body[data-dsh-claude-code-white] :focus-visible { outline-color: rgba(211, 124, 81, .55); }
+body[data-dsh-claude-code-white] ::selection { background: rgba(211, 124, 81, .22); }
+body[data-dsh-claude-code-white][data-ds-dark-theme] ::selection { background: rgba(217, 137, 95, .3); }
+
+/* ---------------------------------------------------------------------------
+   修复 + 收窄：右侧文件面板调宽手柄。
+   1) 命中区与聊天列右侧"上下文"可拖区域重叠（原 12px 盒 + margin-left:-6px
+      探入聊天列，拖调宽线误拖上下文）→ 盒归位到面板边界，不再进入聊天列；
+   2) 命中区收窄至极限 2px（width 为内联样式，需 !important），视觉线 1px
+      发丝线居中贴边界（::after 0.5px 内缩）。
+   --------------------------------------------------------------------------- */
+body[data-dsh-claude-code-white] .aionui-explorer-handle { width: 2px !important; margin-left: 0 !important; }
+body[data-dsh-claude-code-white] .aionui-explorer-handle::after { inset: 0 0.5px 0 0.5px; }
+
+/* 侧边栏调宽手柄：命中区 2px，居中跨边界（width/margin 来自样式表） */
+body[data-dsh-claude-code-white] .pI_x6G_handle { width: 2px; margin-left: 0; }
+
+/* ============================================================================
+   浅色（CCW light：canvas #f8f9fa / surface #fff / ink #242528 / accent #d37c51）
+   ============================================================================ */
+body[data-dsh-claude-code-white] {
+  /* ---- 字体 ---- */
+  --dsw-font-family: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Microsoft YaHei", "PingFang SC", sans-serif;
+  --ds-font-family-code: "Geist Mono", "JetBrains Mono", "Fira Code", Consolas,
+    "Courier New", "Microsoft YaHei", monospace;
+
+  /* ---- 中性灰阶（CCW 灰阶映射，bluish-XX → 语义色） ---- */
+  --dsw-static-neutral-bluish-00: #ffffff;
+  --dsw-static-neutral-bluish-50: #f7f8f9;
+  --dsw-static-neutral-bluish-60: #f3f5f6;
+  --dsw-static-neutral-bluish-75: #eef0f2;
+  --dsw-static-neutral-bluish-100: #e8eaed;
+  --dsw-static-neutral-bluish-150: #e2e4e7;
+  --dsw-static-neutral-bluish-200: #d8dade;
+  --dsw-static-neutral-bluish-250: #d4d6da;
+  --dsw-static-neutral-bluish-300: #cdd0d4;
+  --dsw-static-neutral-bluish-400: #b5b8bd;
+  --dsw-static-neutral-bluish-500: #a1a4a9;
+  --dsw-static-neutral-bluish-550: #979aa0;
+  --dsw-static-neutral-bluish-600: #8f9298;
+  --dsw-static-neutral-bluish-700: #6f7277;
+  --dsw-static-neutral-bluish-750: #45474b;
+  --dsw-static-neutral-bluish-800: #3a3b3f;
+  --dsw-static-neutral-bluish-850: #313236;
+  --dsw-static-neutral-bluish-875: #28292c;
+  --dsw-static-neutral-bluish-900: #1f2022;
+  --dsw-static-neutral-bluish-950: #2b2c30;
+  --dsw-static-neutral-bluish-1000: #242528;
+
+  /* ---- 品牌/主色：珊瑚橙（DeepSeek 蓝 → CCW accent） ---- */
+  --dsw-static-deepseek-50: #f6e8e3;
+  --dsw-static-deepseek-100: #f3dfd8;
+  --dsw-static-deepseek-200: #eccbbf;
+  --dsw-static-deepseek-300: #e3b09c;
+  --dsw-static-deepseek-400: #dc9376;
+  --dsw-static-deepseek-450: #d6865f;
+  --dsw-static-deepseek-500: #d37c51;
+  --dsw-static-deepseek-600: #c06a41;
+  --dsw-static-deepseek-700-delete: #ad5f3f;
+  --dsw-static-deepseek-800: #8a4a31;
+  --dsw-static-deepseek-900: #6e3c28;
+
+  /* ---- 状态色：CCW green / red ---- */
+  --dsw-static-green-100: #dce9e0;
+  --dsw-static-green-400: #7ba88a;
+  --dsw-static-green-500: #5d8f6c;
+  --dsw-static-green-900: #2c4a37;
+  --dsw-static-red-50: #f7e9e6;
+  --dsw-static-red-100: #f2d8d4;
+  --dsw-static-red-400: #d08a7c;
+  --dsw-static-red-500: #c57564;
+  --dsw-static-red-600: #b86252;
+  --dsw-static-red-900: #5f3026;
+
+  /* ---- 别名层：背景 / 边框 / 文字 / 按钮 / 交互 ---- */
+  --dsw-alias-bg-base: #f8f9fa;
+  --dsw-alias-bg-layer-1: #ffffff;
+  --dsw-alias-bg-layer-2: #ffffff;
+  --dsw-alias-bg-layer-3: #fafafa;
+  --dsw-alias-bg-overlay: #ffffff;
+  --dsw-alias-bg-module-platform: #f3f5f6;
+  --dsw-alias-bg-multi-select: #f3f5f6;
+  --dsw-alias-bg-skeleton: rgba(0, 0, 0, .05);
+  --dsw-alias-border-l1: #e2e4e7;
+  --dsw-alias-border-l2: #d1d4d8;
+  --dsw-alias-border-l2-darkmode-thin: #e2e4e7;
+  --dsw-alias-border-l3: #c8cbd0;
+  --dsw-alias-border-l4: #b9bcc2;
+  --dsw-alias-border-inverted: #34363a;
+  --dsw-alias-border-inverted2: #484b51;
+  --dsw-alias-brand-primary: #d37c51;
+  --dsw-alias-brand-primary-invert: #242528;
+  --dsw-alias-brand-primary-new-colorprimary-new-color: #d37c51;
+  --dsw-alias-brand-text: #ad5f3f;
+  --dsw-alias-button-primary-fill: #d37c51;
+  --dsw-alias-button-primary-hover: #c06a41;
+  --dsw-alias-button-primary-dimmed: #f6e8e3;
+  --dsw-alias-button-info-fill: #d37c51;
+  --dsw-alias-button-info-hover: #c06a41;
+  --dsw-alias-button-contrast-fill: #45474b;
+  --dsw-alias-button-elevated-fill: #ffffff;
+  --dsw-alias-button-floating-fill: #ffffff;
+  --dsw-alias-button-floating-hover: #f3f5f6;
+  --dsw-alias-button-ghost-active-border: #d1d4d8;
+  --dsw-alias-button-ghost-active-fill: #f3f5f6;
+  --dsw-alias-button-ghost-active-hover: #eef0f2;
+  --dsw-alias-button-tool-bar-fill: rgba(36, 37, 40, .42);
+  --dsw-alias-button-tool-bar-fill-invisible: rgba(36, 37, 40, .3);
+  --dsw-alias-button-tool-bar-hover: rgba(36, 37, 40, .55);
+  --dsw-alias-interactive-bg-active: rgba(36, 37, 40, .09);
+  --dsw-alias-interactive-bg-hover: rgba(36, 37, 40, .05);
+  --dsw-alias-interactive-bg-hover-accent: rgba(211, 124, 81, .1);
+  --dsw-alias-interactive-bg-hover-danger: rgba(184, 98, 82, .06);
+  --dsw-alias-interactive-bg-hover-solid: #f3f5f6;
+  --dsw-alias-label-primary: #242528;
+  --dsw-alias-label-primary-dimmed: #45474b;
+  --dsw-alias-label-primary-foreground: #ffffff;
+  --dsw-alias-label-primary-inverted: #ffffff;
+  --dsw-alias-label-secondary: #45474b;
+  --dsw-alias-label-tertiary: #6f7277;
+  --dsw-alias-label-caption: #9b9ea4;
+  --dsw-alias-label-dimmed: #a9acb1;
+  --dsw-alias-label-primary-bluish: #6f7277;
+  --dsw-alias-markdown-code-block: #f3f5f6;
+  --dsw-alias-markdown-code-block-banner: #f3f5f6;
+  --dsw-alias-markdown-code-segment-selected: #ffffff;
+  --dsw-alias-markdown-code-segment-unselected: #eef0f2;
+  --dsw-alias-markdown-inline-code: #e8eaed;
+  --dsw-alias-markdown-placeholder: #f3f5f6;
+  --dsw-alias-markdown-tag: #eef0f2;
+  --dsw-alias-markdown-citation: #f3f5f6;
+  --dsw-alias-scrollbar-bg-l1: #e2e4e7;
+  --dsw-alias-scrollbar-bg-l2: #e2e4e7;
+  --dsw-alias-scrollbar-hover-l1: #d1d4d8;
+  --dsw-alias-scrollbar-hover-l2: #d1d4d8;
+  --dsw-alias-state-business-primary: #d37c51;
+  --dsw-alias-state-business-tertiary: #f6e8e3;
+  --dsw-alias-state-error-primary: #b86252;
+  --dsw-alias-state-error-secondary: #c57564;
+  --dsw-alias-state-success-primary: #5d8f6c;
+  --dsw-alias-state-success-secondary: #7ba88a;
+  --dsw-alias-state-success-tertiary: #dce9e0;
+  --dsw-alias-toast-bg: #3a3b3f;
+  --dsw-alias-tooltip-bg: #313236;
+  --dsw-specific-bubble: #eef0f2;
+  --dsw-specific-bubble-highlight: #e4e7ea;
+  --dsw-specific-input-major: #ffffff;
+  --dsw-specific-login-input: #f7f8f9;
+  --dsw-specific-menu: #ffffff;
+  --dsw-specific-selector: #f3f5f6;
+  --dsw-specific-sidebar-fill: #f7f8f9;
+  --dsw-specific-sidebar-nav-item-active: #eef0f2;
+  --dsw-specific-sidebar-nav-item-hover: #eef0f2;
+  --dsw-specific-sidebar-nav-item-active-accent: #f6e8e3;
+  --dsw-specific-tip: #f3f5f6;
+}
+
+/* ============================================================================
+   深色（CCW dark：canvas #18191b / surface #222326 / ink #f1f2f4 / accent #d9895f）
+   ============================================================================ */
+body[data-dsh-claude-code-white][data-ds-dark-theme] {
+  /* ---- 中性灰阶 ---- */
+  --dsw-static-neutral-bluish-00: #ffffff;
+  --dsw-static-neutral-bluish-50: #f1f2f4;
+  --dsw-static-neutral-bluish-60: #eceef0;
+  --dsw-static-neutral-bluish-75: #e4e6e8;
+  --dsw-static-neutral-bluish-100: #d0d2d6;
+  --dsw-static-neutral-bluish-150: #c2c5c9;
+  --dsw-static-neutral-bluish-200: #b4b7bc;
+  --dsw-static-neutral-bluish-250: #a7aab0;
+  --dsw-static-neutral-bluish-300: #a7aab0;
+  --dsw-static-neutral-bluish-400: #8f9298;
+  --dsw-static-neutral-bluish-500: #85888e;
+  --dsw-static-neutral-bluish-550: #7b7e84;
+  --dsw-static-neutral-bluish-600: #777a81;
+  --dsw-static-neutral-bluish-700: #56595f;
+  --dsw-static-neutral-bluish-750: #484b51;
+  --dsw-static-neutral-bluish-800: #34363a;
+  --dsw-static-neutral-bluish-850: #2d2f33;
+  --dsw-static-neutral-bluish-875: #292a2d;
+  --dsw-static-neutral-bluish-900: #242529;
+  --dsw-static-neutral-bluish-950: #18191b;
+  --dsw-static-neutral-bluish-1000: #ffffff;
+
+  /* ---- 品牌/主色：珊瑚橙深色系 ---- */
+  --dsw-static-deepseek-50: #402c26;
+  --dsw-static-deepseek-100: #4c3128;
+  --dsw-static-deepseek-200: #5b3a2e;
+  --dsw-static-deepseek-300: #7a4d39;
+  --dsw-static-deepseek-400: #c07a50;
+  --dsw-static-deepseek-450: #d0835a;
+  --dsw-static-deepseek-500: #d9895f;
+  --dsw-static-deepseek-600: #c67a52;
+  --dsw-static-deepseek-700-delete: #eda27d;
+  --dsw-static-deepseek-800: #e3b6a0;
+  --dsw-static-deepseek-900: #f3d9cc;
+
+  /* ---- 状态色 ---- */
+  --dsw-static-green-100: #2c4a37;
+  --dsw-static-green-400: #8ab797;
+  --dsw-static-green-500: #7aa987;
+  --dsw-static-green-900: #dce9e0;
+  --dsw-static-red-50: #3a2622;
+  --dsw-static-red-100: #4c2e28;
+  --dsw-static-red-400: #d9887a;
+  --dsw-static-red-500: #d47e6d;
+  --dsw-static-red-600: #d07a68;
+  --dsw-static-red-900: #f3d4cb;
+
+  /* ---- 别名层 ---- */
+  --dsw-alias-bg-base: #18191b;
+  --dsw-alias-bg-layer-1: #222326;
+  --dsw-alias-bg-layer-2: #292a2d;
+  --dsw-alias-bg-layer-3: #242529;
+  --dsw-alias-bg-overlay: #292a2d;
+  --dsw-alias-bg-module-platform: #242529;
+  --dsw-alias-bg-multi-select: #242529;
+  --dsw-alias-bg-skeleton: rgba(255, 255, 255, .05);
+  --dsw-alias-border-l1: #34363a;
+  --dsw-alias-border-l2: #484b51;
+  --dsw-alias-border-l2-darkmode-thin: #34363a;
+  --dsw-alias-border-l3: #56595f;
+  --dsw-alias-border-l4: #64686f;
+  --dsw-alias-border-inverted: #e2e4e7;
+  --dsw-alias-border-inverted2: #d1d4d8;
+  --dsw-alias-brand-primary: #d9895f;
+  --dsw-alias-brand-primary-invert: #f1f2f4;
+  --dsw-alias-brand-primary-new-colorprimary-new-color: #d9895f;
+  --dsw-alias-brand-text: #eda27d;
+  --dsw-alias-button-primary-fill: #d9895f;
+  --dsw-alias-button-primary-hover: #c67a52;
+  --dsw-alias-button-primary-dimmed: #402c26;
+  --dsw-alias-button-info-fill: #d9895f;
+  --dsw-alias-button-info-hover: #c67a52;
+  --dsw-alias-button-contrast-fill: #a7aab0;
+  --dsw-alias-button-elevated-fill: #222326;
+  --dsw-alias-button-floating-fill: #222326;
+  --dsw-alias-button-floating-hover: #242529;
+  --dsw-alias-button-ghost-active-border: #484b51;
+  --dsw-alias-button-ghost-active-fill: #242529;
+  --dsw-alias-button-ghost-active-hover: #2d2f33;
+  --dsw-alias-button-tool-bar-fill: rgba(255, 255, 255, .12);
+  --dsw-alias-button-tool-bar-fill-invisible: rgba(255, 255, 255, .08);
+  --dsw-alias-button-tool-bar-hover: rgba(255, 255, 255, .2);
+  --dsw-alias-interactive-bg-active: rgba(255, 255, 255, .09);
+  --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, .05);
+  --dsw-alias-interactive-bg-hover-accent: rgba(217, 137, 95, .12);
+  --dsw-alias-interactive-bg-hover-danger: rgba(208, 122, 104, .07);
+  --dsw-alias-interactive-bg-hover-solid: #242529;
+  --dsw-alias-label-primary: #f1f2f4;
+  --dsw-alias-label-primary-dimmed: #d0d2d6;
+  --dsw-alias-label-primary-foreground: #fffaf7;
+  --dsw-alias-label-primary-inverted: #fffaf7;
+  --dsw-alias-label-secondary: #d0d2d6;
+  --dsw-alias-label-tertiary: #a7aab0;
+  --dsw-alias-label-caption: #777a81;
+  --dsw-alias-label-dimmed: #777a81;
+  --dsw-alias-label-primary-bluish: #a7aab0;
+  --dsw-alias-markdown-code-block: #242529;
+  --dsw-alias-markdown-code-block-banner: #242529;
+  --dsw-alias-markdown-code-segment-selected: #222326;
+  --dsw-alias-markdown-code-segment-unselected: #2d2f33;
+  --dsw-alias-markdown-inline-code: #2d2f33;
+  --dsw-alias-markdown-placeholder: #242529;
+  --dsw-alias-markdown-tag: #2d2f33;
+  --dsw-alias-markdown-citation: #242529;
+  --dsw-alias-scrollbar-bg-l1: #34363a;
+  --dsw-alias-scrollbar-bg-l2: #34363a;
+  --dsw-alias-scrollbar-hover-l1: #484b51;
+  --dsw-alias-scrollbar-hover-l2: #484b51;
+  --dsw-alias-state-business-primary: #d9895f;
+  --dsw-alias-state-business-tertiary: #402c26;
+  --dsw-alias-state-error-primary: #d07a68;
+  --dsw-alias-state-error-secondary: #d9887a;
+  --dsw-alias-state-success-primary: #7aa987;
+  --dsw-alias-state-success-secondary: #8ab797;
+  --dsw-alias-state-success-tertiary: #2c4a37;
+  --dsw-alias-toast-bg: #292a2d;
+  --dsw-alias-tooltip-bg: #34363a;
+  --dsw-specific-bubble: #2d2f33;
+  --dsw-specific-bubble-highlight: #33353a;
+  --dsw-specific-input-major: #222326;
+  --dsw-specific-login-input: #1c1d1f;
+  --dsw-specific-menu: #292a2d;
+  --dsw-specific-selector: #242529;
+  --dsw-specific-sidebar-fill: #1c1d1f;
+  --dsw-specific-sidebar-nav-item-active: #2d2f33;
+  --dsw-specific-sidebar-nav-item-hover: #2d2f33;
+  --dsw-specific-sidebar-nav-item-active-accent: #402c26;
+  --dsw-specific-tip: #242529;
+}
