@@ -125,9 +125,9 @@ Anthropic's Usage & Cost API only works with organization Admin API keys — it 
 2. 粘贴一次 API Key；勾选“使用 Windows 当前账户安全保存”（默认开启）则经 DPAPI 加密存入 `%LOCALAPPDATA%\ClaudeCodeWhite\deepseek-api-key.dpapi`（仅当前用户可解密，Windows 若不可用会提示改回仅本次启动），取消勾选则只存在桥接器内存、关闭即失效。
 3. 验证成功后该会话自动切换到 DeepSeek V4 Pro；也可以在设置里改回 Claude。
 
-要点：Key 连接时只发给 `127.0.0.1` 本机桥接器并直接调用 DeepSeek 官方余额接口验证（失败不会覆盖旧密钥）；Key 永不写入浏览器存储、会话记录、日志或发布包，状态接口只返回配置来源（本次启动 / 环境变量 / Windows 安全存储）。DeepSeek 仍通过本机 `claude` CLI 驱动（发起请求的还是 Claude Code），因此权限、工具、停止、排队、调整方向、历史与恢复行为完全一致；未做端到端验证前，DeepSeek 会话会禁用图片输入并明确提示。
+要点：Key 连接时只发给 `127.0.0.1` 本机桥接器并直接调用 DeepSeek 官方余额接口验证（失败不会覆盖旧密钥）；Key 永不写入浏览器存储、会话记录、日志或发布包，状态接口只返回配置来源（本次启动 / 环境变量 / Windows 安全存储）。DeepSeek 仍通过本机 `claude` CLI 驱动（发起请求的还是 Claude Code），因此权限、工具、停止、排队、调整方向、历史与恢复行为完全一致。
 
-模型与思考强度：UI 只提供 DeepSeek V4 Pro（`deepseek-v4-pro[1m]`）与 V4 Flash（`deepseek-v4-flash`）。五档思考强度在 DeepSeek 侧映射为两档——快速 / 标准 / 深入 → `high`，极强 / 最大 → `max`，界面会明文说明。
+模型与思考强度：UI 提供 DeepSeek V4 Pro（`deepseek-v4-pro[1m]`）、**V4 Flash Vision（`deepseek-v4-flash-vision-exp[1m]`，多模态实验模型，支持图片输入）**与 V4 Flash（`deepseek-v4-flash`）。图片能力按模型判定：Vision 模型可像 Claude 一样选择、拖拽、粘贴图片；V4 Pro / V4 Flash 在端到端验证前禁用图片并明确提示“请选择 V4 Flash Vision”。五档思考强度在 DeepSeek 侧映射为两档——快速 / 标准 / 深入 → `high`，极强 / 最大 → `max`，界面会明文说明。
 
 断开与恢复：在提供商页或“用量与额度”中心移除配置即可（同时删除 DPAPI 文件）；若系统中还设置了 `DEEPSEEK_API_KEY` 环境变量，桥接器会继续报告 environment 来源并解释原因。环境变量不会被删除，也不会被修改。
 

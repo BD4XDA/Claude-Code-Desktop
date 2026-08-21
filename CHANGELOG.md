@@ -9,7 +9,7 @@
 - **本机接口防护升级**：所有写接口在读取请求体前显式校验 Origin 必须为本机来源，非本机网页直接 403（不依赖 CORS 头拦截）；密钥日志脱敏覆盖 `sk-` 后的所有非空白/引号字符；桥接协议升级至 10（`deepseek-provider` / `secure-provider-store`）。
 - **思考强度透明映射**：五档交互在 DeepSeek 侧映射为两档（快速 / 标准 / 深入 → `high`；极强 / 最大 → `max`），界面明文说明，不伪造五种真实能力。
 - **消息归属与账本**：每条回复按发送时快照显示来源（`DeepSeek · Claude Code` / D 徽章 / Claude 标记）；本机会话账本按提供商 + 模型分组，DeepSeek 消耗不再记在 Claude 模型下。
-- **图片输入明确降级**：DeepSeek 图片能力完成端到端验证前，DeepSeek 会话禁用图片选择、拖拽与粘贴，并提示「当前 DeepSeek 模型暂不支持图片输入」，不静默丢弃；Claude 会话不受影响。
+- **多模态模型 V4 Flash Vision**：新增 `deepseek-v4-flash-vision-exp[1m]`（多模态实验模型），支持图片选择、拖拽与粘贴；图片能力按模型判定——Vision 模型启用图片，V4 Pro / V4 Flash 在端到端验证前禁用并提示「请选择 V4 Flash Vision」，不静默丢弃；Claude 会话不受影响。
 - **历史恢复兼容**：历史模型为 `deepseek-v4-*` 且已配置密钥时按 DeepSeek 恢复；未配置密钥时以只读方式打开并提示先连接。
 - 修复遗留：Windows 下 PowerShell 不在 PATH 时 DPAPI 存储优先按 `SystemRoot` 绝对路径查找 `powershell.exe`。
 

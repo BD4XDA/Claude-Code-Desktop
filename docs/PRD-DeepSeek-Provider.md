@@ -123,7 +123,10 @@ https://api.deepseek.com/anthropic
 | UI 名称 | 请求模型 | 用途 |
 |---|---|---|
 | DeepSeek V4 Pro | `deepseek-v4-pro[1m]` | 复杂编码、深度推理、大型项目 |
+| DeepSeek V4 Flash Vision | `deepseek-v4-flash-vision-exp[1m]` | 多模态实验模型：图片理解 + 日常编码（**支持图片输入**） |
 | DeepSeek V4 Flash | `deepseek-v4-flash` | 日常编码、快速响应、低成本任务 |
+
+图片能力按模型判定：仅 vision-exp 多模态模型启用图片；V4 Pro / V4 Flash 在完成 8.3 端到端验证前保持禁用提示。
 
 兼容后备值 `deepseek-v4-pro` 可由桥接白名单接受，但默认 UI 使用 `deepseek-v4-pro[1m]`。
 
@@ -422,6 +425,8 @@ DeepSeek 会话启动：V4 Pro · max
 ### 8.3 图片能力
 
 不能仅根据 Anthropic 格式兼容就假设所有 DeepSeek 模型接受图片内容。
+
+> 更新（2026-08-21 实施）：`deepseek-v4-flash-vision-exp[1m]` 为官方多模态模型，已列入 4.2 模型表并启用图片输入；V4 Pro / V4 Flash 仍未验证，保持下方"不支持"降级路径。
 
 实现者必须进行 DeepSeek Claude Code 端到端验证：
 

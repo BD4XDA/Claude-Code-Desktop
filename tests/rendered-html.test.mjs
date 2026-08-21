@@ -152,6 +152,11 @@ test("keeps the local bridge narrow and Claude Code-specific", async () => {
   assert.match(page, /DEEPSEEK_EFFORT_MAP/);
   assert.match(page, /DeepSeek · Claude Code|DeepSeek.*Claude Code/);
   assert.match(page, /DeepSeek 模型暂不支持图片输入/);
+  assert.match(page, /deepseek-v4-flash-vision-exp\[1m\]/);
+  assert.match(page, /deepSeekModelSupportsImages/);
+  assert.match(page, /V4 Flash Vision/);
+  assert.match(bridge, /deepseek-v4-flash-vision-exp\[1m\]/);
+  assert.match(bridge, /deepSeekModelSupportsImages/);
   assert.match(page, /changeSessionProvider/);
   assert.match(page, /openDeepSeekSetup/);
   assert.match(page, /REMEMBER|安全保存/);

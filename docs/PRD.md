@@ -51,7 +51,7 @@
 - 快捷操作面板（Ctrl+Shift+P）：新建/恢复任务、打开变更/文件/日志/记忆、切换检查面板与主题；支持搜索和 Enter 执行
 - 历史任务恢复：读取本机 `~/.claude/projects/*/*.jsonl` 的最近任务，支持搜索、预览并恢复原始 session ID、项目目录、模型与最近 60 条对话；大记录按头尾窗口读取
 - 模型切换：Sonnet / Opus / **Haiku**（server `ALLOWED_MODELS` 与前端 select 同步）
-- **DeepSeek 原生提供商**（V4 Pro `deepseek-v4-pro[1m]` / V4 Flash `deepseek-v4-flash`）：会话 `provider` 字段独立选择；DeepSeek 子进程经 `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic` + `ANTHROPIC_AUTH_TOKEN` 驱动同一 Claude Code CLI；密钥来源优先级：会话内存 > `DEEPSEEK_API_KEY` 环境变量 > Windows DPAPI（`%LOCALAPPDATA%\ClaudeCodeWhite\deepseek-api-key.dpapi`）；写接口显式拒绝非本机 Origin（403）；五档思考强度映射为 high/max（UI 明文说明）；未端到端验证前禁用图片输入并明确提示
+- **DeepSeek 原生提供商**（V4 Pro `deepseek-v4-pro[1m]` / V4 Flash `deepseek-v4-flash`）：会话 `provider` 字段独立选择；DeepSeek 子进程经 `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic` + `ANTHROPIC_AUTH_TOKEN` 驱动同一 Claude Code CLI；密钥来源优先级：会话内存 > `DEEPSEEK_API_KEY` 环境变量 > Windows DPAPI（`%LOCALAPPDATA%\ClaudeCodeWhite\deepseek-api-key.dpapi`）；写接口显式拒绝非本机 Origin（403）；五档思考强度映射为 high/max（UI 明文说明）；多模态按模型判定——`deepseek-v4-flash-vision-exp[1m]` 支持图片，V4 Pro / V4 Flash 未验证前禁用图片并明确提示
 - Codex 式批准策略：仅规划（plan）/ 操作前批准（manual）/ 自动批准编辑（acceptEdits）/ 智能批准（auto）/ 不询问受限（dontAsk）；逐窗格持久化并真实传入 `--permission-mode`
 - 思考强度：快速 / 标准 / 深入 / 极强 / 最大（low / medium / high / xhigh / max）；逐窗格持久化并真实传入 `--effort`，运行中更改从下一轮推理生效
 - 会话持久化 localStorage（`claude-code-sessions`）+ 主题（`claude-code-theme`）；恢复时清 `sending`

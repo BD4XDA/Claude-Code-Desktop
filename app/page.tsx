@@ -120,22 +120,29 @@ const MAX_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
 const REQUIRED_BRIDGE_PROTOCOL = 10;
 const DEEPSEEK_MODEL_OPTIONS: Array<{ value: string; label: string; badge: string; description: string }> = [
   { value: "deepseek-v4-pro[1m]", label: "V4 Pro", badge: "P", description: "复杂编码、深度推理、大型项目" },
+  { value: "deepseek-v4-flash-vision-exp[1m]", label: "V4 Flash Vision", badge: "V", description: "多模态实验模型：图片理解 + 日常编码（支持图片输入）" },
   { value: "deepseek-v4-flash", label: "V4 Flash", badge: "F", description: "日常编码、快速响应、低成本任务" },
 ];
 const DEEPSEEK_SOURCE_LABEL: Record<string, string> = { memory: "本次启动", environment: "环境变量", "secure-store": "Windows 安全存储" };
 // 五档交互在 DeepSeek 侧只有 high/max 两档（PRD 4.4），UI 明文说明，不伪造五种真实能力。
 const DEEPSEEK_EFFORT_MAP: Record<EffortLevel, "high" | "max"> = { low: "high", medium: "high", high: "high", xhigh: "max", max: "max" };
-const DEEPSEEK_IMAGES_SUPPORTED = false; // 需端到端验证官方端点图片能力；验证通过前禁用并明确提示（PRD 8.3）
+// 多模态按模型判定：仅 vision-exp 支持图片；其余 DeepSeek 模型在端到端验证前禁用并明确提示（PRD 8.3）。
+const DEEPSEEK_VISION_MODEL = "deepseek-v4-flash-vision-exp[1m]";
+
+function deepSeekModelSupportsImages(model: string) {
+  return model === DEEPSEEK_VISION_MODEL;
+}
 
 function modelLabel(model: string) {
   return MODEL_OPTIONS.find((option) => option.value === model)?.label
     || DEEPSEEK_MODEL_OPTIONS.find((option) => option.value === model)?.label
-    || model.replace(/\[1m\]$/, "");
+    || model.replace(/\[1m\]$/i, "");
 }
 
 function modelShortLabel(model: string) {
   const label = modelLabel(model);
-  return label === "V4 Pro" || label === "V4 Flash" ? `${label}${model.includes("[1m]") ? " ·1M" : ""}` : label;
+  const wide = label === "V4 Pro" || label === "V4 Flash" || label.includes("Vision");
+  return wide ? `${label}${/\[1m\]/i.test(model) ? " ·1M" : ""}` : label;
 }
 
 function readDraftImage(file: File): Promise<DraftImage> {
@@ -1032,9 +1039,10 @@ export default function Home() {
   async function addDraftImages(id: string, incoming: File[]) {
     const files = incoming.filter((file): file is File => file instanceof File);
     if (!files.length) return;
-    // DeepSeek 图片能力未经端到端验证时：明确提示并禁用，绝不静默丢弃（PRD 8.3）
-    if (!DEEPSEEK_IMAGES_SUPPORTED && sessions.find((item) => item.id === id)?.provider === "deepseek") {
-      setImageNotices((current) => ({ ...current, [id]: "当前 DeepSeek 模型暂不支持图片输入。" }));
+    // 多模态按模型判定：仅 vision-exp 支持图片；其余 DeepSeek 模型在验证前明确提示并禁用，绝不静默丢弃（PRD 8.3）
+    const targetSession = sessions.find((item) => item.id === id);
+    if (targetSession?.provider === "deepseek" && !deepSeekModelSupportsImages(targetSession.model)) {
+      setImageNotices((current) => ({ ...current, [id]: "当前 DeepSeek 模型暂不支持图片输入，请选择 V4 Flash Vision。" }));
       return;
     }
     const existing = draftImages[id] || [];
@@ -1082,9 +1090,10 @@ export default function Home() {
     if (!Array.from(event.dataTransfer.types).includes("Files")) return;
     event.preventDefault();
     event.stopPropagation();
-    // 不允许静默丢弃：DeepSeek 会话明确提示并拒绝图片（PRD 8.3）
-    if (!DEEPSEEK_IMAGES_SUPPORTED && sessions.find((item) => item.id === id)?.provider === "deepseek") {
-      setImageNotices((current) => ({ ...current, [id]: "当前 DeepSeek 模型暂不支持图片输入。" }));
+    // 不允许静默丢弃：DeepSeek 非 vision 模型明确提示并拒绝图片（PRD 8.3）
+    const dragSession = sessions.find((item) => item.id === id);
+    if (dragSession?.provider === "deepseek" && !deepSeekModelSupportsImages(dragSession.model)) {
+      setImageNotices((current) => ({ ...current, [id]: "当前 DeepSeek 模型暂不支持图片输入，请选择 V4 Flash Vision。" }));
       return;
     }
     event.dataTransfer.dropEffect = "copy";
@@ -1327,8 +1336,8 @@ export default function Home() {
     if (!current || current.sending) return;
     const snapshotProvider = current.provider;
     const snapshotModel = current.model;
-    if (snapshotProvider === "deepseek" && images.length > 0 && !DEEPSEEK_IMAGES_SUPPORTED) {
-      setImageNotices((currentNotices) => ({ ...currentNotices, [id]: "当前 DeepSeek 模型暂不支持图片输入。" }));
+    if (snapshotProvider === "deepseek" && images.length > 0 && !deepSeekModelSupportsImages(snapshotModel)) {
+      setImageNotices((currentNotices) => ({ ...currentNotices, [id]: "当前 DeepSeek 模型暂不支持图片输入，请选择 V4 Flash Vision。" }));
       return;
     }
     const assistantId = crypto.randomUUID();
@@ -1759,7 +1768,7 @@ export default function Home() {
                   </div>
                 </article>;
               })}</div>}
-              <div className="composer">{imageDragSessionId === id && <div className="composer-drop-overlay"><span><UiIcon name="plus"/></span><strong>松开以添加多张图片</strong><small>JPG、PNG、GIF、WebP</small></div>}{sessionDraftImages.length > 0 && <div className="draft-image-rail" aria-label={`已添加 ${sessionDraftImages.length} 张图片`}>{sessionDraftImages.map((image) => <div className="draft-image" key={image.id}><button type="button" className="draft-image-preview" title={`查看 ${image.name}`} onClick={() => setPreviewImage(image)}><img src={image.dataUrl} alt={image.name}/></button><button type="button" className="draft-image-remove" aria-label={`移除 ${image.name}`} onClick={() => removeDraftImage(id, image.id)}>×</button></div>)}</div>}<textarea value={session.draft} onChange={(event) => { if (speechSessionIdRef.current === id) cancelVoiceInput(); patchSession(id, (item) => ({ ...item, draft: event.target.value })); }} onPaste={(event) => handleImagePaste(event, id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={session.sending ? "继续输入；发送后可选择立即调整方向…" : sessionDraftImages.length ? "补充说明，或直接发送图片…" : `让 ${session.provider === "deepseek" ? "DeepSeek 通过 Claude Code" : "Claude"} 修改代码、运行命令、解释项目或分析图片…`} rows={2}/>{imageNotices[id] && <div className="image-notice" role="status">{imageNotices[id]}</div>}<div className="composer-toolbar"><div className="toolbar-left">{session.provider === "deepseek" && !DEEPSEEK_IMAGES_SUPPORTED ? <button type="button" className="add-context image-picker is-disabled" title="当前 DeepSeek 模型暂不支持图片输入" aria-label="当前 DeepSeek 模型暂不支持图片输入" onClick={() => setImageNotices((current) => ({ ...current, [id]: "当前 DeepSeek 模型暂不支持图片输入。" }))}><span><UiIcon name="plus" size={16}/></span></button> : <label className="add-context image-picker" title="上传图片（支持一次选择多张）" aria-label="上传图片"><input type="file" accept={IMAGE_ACCEPT} multiple onChange={(event) => { const files = Array.from(event.currentTarget.files || []); event.currentTarget.value = ""; void addDraftImages(id, files); }}/><span><UiIcon name="plus" size={16}/></span></label>}<PermissionControl value={session.permissionMode} sending={session.sending} onChange={(permissionMode) => patchSession(id, (item) => ({ ...item, permissionMode }))}/></div><div className="composer-actions"><ClaudeSettingsControl provider={session.provider} model={session.model} effort={session.effort} sending={session.sending} deepseekConfigured={Boolean(status.deepseekConfigured)} onProviderChange={(provider) => changeSessionProvider(id, provider)} onConfigureDeepSeek={() => void openDeepSeekSetup(id)} onModelChange={(model) => patchSession(id, (item) => ({ ...item, model, claudeSessionId: null }))} onEffortChange={(effort) => patchSession(id, (item) => ({ ...item, effort }))}/><button type="button" className={`voice-button ${listeningSessionId === id ? "listening" : ""}`} aria-pressed={listeningSessionId === id} title={listeningSessionId === id ? "停止语音输入" : "语音转文字"} aria-label={listeningSessionId === id ? "停止语音输入" : "开始语音转文字"} onClick={() => toggleVoiceInput(id)}><UiIcon name="microphone" size={17}/><span className="voice-listening-dot" aria-hidden="true"/></button>{session.sending ? <>{hasDraftContent && <button className="send-button queue-send" title="加入排队" aria-label="加入排队"><UiIcon name="send" size={15}/></button>}<button type="button" className="stop-button" disabled={stoppingSessionIds.has(id)} title={stoppingSessionIds.has(id) ? "正在停止…" : "停止当前任务"} aria-label={stoppingSessionIds.has(id) ? "正在停止当前任务" : "停止当前任务"} onClick={() => void stopSession(id)}><UiIcon name="stop" size={14}/></button></> : <button className="send-button" disabled={!hasDraftContent} title="发送" aria-label="发送"><UiIcon name="send" size={15}/></button>}</div></div></div>
+              <div className="composer">{imageDragSessionId === id && <div className="composer-drop-overlay"><span><UiIcon name="plus"/></span><strong>松开以添加多张图片</strong><small>JPG、PNG、GIF、WebP</small></div>}{sessionDraftImages.length > 0 && <div className="draft-image-rail" aria-label={`已添加 ${sessionDraftImages.length} 张图片`}>{sessionDraftImages.map((image) => <div className="draft-image" key={image.id}><button type="button" className="draft-image-preview" title={`查看 ${image.name}`} onClick={() => setPreviewImage(image)}><img src={image.dataUrl} alt={image.name}/></button><button type="button" className="draft-image-remove" aria-label={`移除 ${image.name}`} onClick={() => removeDraftImage(id, image.id)}>×</button></div>)}</div>}<textarea value={session.draft} onChange={(event) => { if (speechSessionIdRef.current === id) cancelVoiceInput(); patchSession(id, (item) => ({ ...item, draft: event.target.value })); }} onPaste={(event) => handleImagePaste(event, id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={session.sending ? "继续输入；发送后可选择立即调整方向…" : sessionDraftImages.length ? "补充说明，或直接发送图片…" : `让 ${session.provider === "deepseek" ? "DeepSeek 通过 Claude Code" : "Claude"} 修改代码、运行命令、解释项目或分析图片…`} rows={2}/>{imageNotices[id] && <div className="image-notice" role="status">{imageNotices[id]}</div>}<div className="composer-toolbar"><div className="toolbar-left">{session.provider === "deepseek" && !deepSeekModelSupportsImages(session.model) ? <button type="button" className="add-context image-picker is-disabled" title="当前 DeepSeek 模型暂不支持图片输入，请选择 V4 Flash Vision" aria-label="当前 DeepSeek 模型暂不支持图片输入" onClick={() => setImageNotices((current) => ({ ...current, [id]: "当前 DeepSeek 模型暂不支持图片输入，请选择 V4 Flash Vision。" }))}><span><UiIcon name="plus" size={16}/></span></button> : <label className="add-context image-picker" title="上传图片（支持一次选择多张）" aria-label="上传图片"><input type="file" accept={IMAGE_ACCEPT} multiple onChange={(event) => { const files = Array.from(event.currentTarget.files || []); event.currentTarget.value = ""; void addDraftImages(id, files); }}/><span><UiIcon name="plus" size={16}/></span></label>}<PermissionControl value={session.permissionMode} sending={session.sending} onChange={(permissionMode) => patchSession(id, (item) => ({ ...item, permissionMode }))}/></div><div className="composer-actions"><ClaudeSettingsControl provider={session.provider} model={session.model} effort={session.effort} sending={session.sending} deepseekConfigured={Boolean(status.deepseekConfigured)} onProviderChange={(provider) => changeSessionProvider(id, provider)} onConfigureDeepSeek={() => void openDeepSeekSetup(id)} onModelChange={(model) => patchSession(id, (item) => ({ ...item, model, claudeSessionId: null }))} onEffortChange={(effort) => patchSession(id, (item) => ({ ...item, effort }))}/><button type="button" className={`voice-button ${listeningSessionId === id ? "listening" : ""}`} aria-pressed={listeningSessionId === id} title={listeningSessionId === id ? "停止语音输入" : "语音转文字"} aria-label={listeningSessionId === id ? "停止语音输入" : "开始语音转文字"} onClick={() => toggleVoiceInput(id)}><UiIcon name="microphone" size={17}/><span className="voice-listening-dot" aria-hidden="true"/></button>{session.sending ? <>{hasDraftContent && <button className="send-button queue-send" title="加入排队" aria-label="加入排队"><UiIcon name="send" size={15}/></button>}<button type="button" className="stop-button" disabled={stoppingSessionIds.has(id)} title={stoppingSessionIds.has(id) ? "正在停止…" : "停止当前任务"} aria-label={stoppingSessionIds.has(id) ? "正在停止当前任务" : "停止当前任务"} onClick={() => void stopSession(id)}><UiIcon name="stop" size={14}/></button></> : <button className="send-button" disabled={!hasDraftContent} title="发送" aria-label="发送"><UiIcon name="send" size={15}/></button>}</div></div></div>
             </form>
           </section>;
         })}</div>

@@ -13,8 +13,14 @@ const ALLOWED_MODELS = new Set(["sonnet", "opus", "haiku"]);
 // DeepSeek Anthropic 兼容端点；deepseek-v4-pro 为兼容后备值，默认 UI 使用带 [1m] 的模型。
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic";
 const DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
-const DEEPSEEK_MODELS = new Set(["deepseek-v4-pro[1m]", "deepseek-v4-flash", "deepseek-v4-pro"]);
-const DEEPSEEK_UI_MODELS = ["deepseek-v4-pro[1m]", "deepseek-v4-flash"];
+const DEEPSEEK_MODELS = new Set(["deepseek-v4-pro[1m]", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp[1m]"]);
+const DEEPSEEK_UI_MODELS = ["deepseek-v4-pro[1m]", "deepseek-v4-flash-vision-exp[1m]", "deepseek-v4-flash"];
+// 多模态按模型判定：vision-exp 为官方图片实验模型；其余 DeepSeek 模型在端到端验证前不启用图片。
+const DEEPSEEK_VISION_MODEL = "deepseek-v4-flash-vision-exp[1m]";
+
+function deepSeekModelSupportsImages(model) {
+  return model === DEEPSEEK_VISION_MODEL;
+}
 const PROVIDER_KINDS = new Set(["claude", "deepseek"]);
 const DEEPSEEK_EFFORT_MAP = { low: "high", medium: "high", high: "high", xhigh: "max", max: "max" };
 
@@ -1365,8 +1371,10 @@ export {
   DEEPSEEK_MODELS,
   DEEPSEEK_UI_MODELS,
   DEEPSEEK_EFFORT_MAP,
+  DEEPSEEK_VISION_MODEL,
   modelAllowed,
   defaultModelFor,
+  deepSeekModelSupportsImages,
   isLocalOrigin,
   deepSeekConfiguration,
   deepSeekCredential,

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import {
   BRIDGE_PROTOCOL, DEEPSEEK_BASE_URL, DEEPSEEK_EFFORT_MAP,
-  modelAllowed, defaultModelFor, isLocalOrigin, deepSeekConfiguration, deepSeekCredential,
+  modelAllowed, defaultModelFor, deepSeekModelSupportsImages, isLocalOrigin, deepSeekConfiguration, deepSeekCredential,
   deepSeekChildEnvironment, readDpapiKey, writeDpapiKey, deleteDpapiKey, fetchDeepSeekBalance,
   createBridgeHandler, __setDeepSeekMemoryKeyForTests, __setFetchImplForTests,
 } from "../bridge/server.mjs";
@@ -43,6 +43,9 @@ test("bridge protocol is 10 and provider whitelists stay independent", () => {
   assert.equal(modelAllowed("deepseek", "deepseek-v4-pro[1m]"), true);
   assert.equal(modelAllowed("deepseek", "deepseek-v4-flash"), true);
   assert.equal(modelAllowed("deepseek", "deepseek-v4-pro"), true); // 兼容后备值
+  assert.equal(modelAllowed("deepseek", "deepseek-v4-flash-vision-exp[1m]"), true); // 多模态模型
+  assert.equal(deepSeekModelSupportsImages("deepseek-v4-flash-vision-exp[1m]"), true);
+  assert.equal(deepSeekModelSupportsImages("deepseek-v4-pro[1m]"), false);
   assert.equal(modelAllowed("deepseek", "sonnet"), false);
   assert.equal(defaultModelFor("claude"), "sonnet");
   assert.equal(defaultModelFor("deepseek"), "deepseek-v4-pro[1m]");
@@ -182,7 +185,7 @@ test("GET /api/providers/deepseek returns only non-sensitive provider state", as
   assert.equal(payload.configured, true);
   assert.equal(payload.source, "memory");
   assert.equal(payload.baseUrl, DEEPSEEK_BASE_URL);
-  assert.deepEqual(payload.models, ["deepseek-v4-pro[1m]", "deepseek-v4-flash"]);
+  assert.deepEqual(payload.models, ["deepseek-v4-pro[1m]", "deepseek-v4-flash-vision-exp[1m]", "deepseek-v4-flash"]);
   const text = JSON.stringify(payload);
   assert.doesNotMatch(text, /sk-[a-zA-Z0-9]/);
   assert.doesNotMatch(text, /auth.*token/i);
