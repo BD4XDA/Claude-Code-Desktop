@@ -3,20 +3,22 @@
 
 import { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent, FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type BridgeStatus = { bridge: boolean; bridgeProtocol?: number; capabilities?: string[]; claudeInstalled: boolean; claudeVersion?: string; claudePath?: string; cwd?: string };
+type ProviderKind = "claude" | "deepseek";
+type BridgeStatus = { bridge: boolean; bridgeProtocol?: number; capabilities?: string[]; claudeInstalled: boolean; claudeVersion?: string; claudePath?: string; cwd?: string; deepseekConfigured?: boolean; deepseekCredentialSource?: string | null };
 type TimelineItem = { kind: "thinking" | "tool" | "file" | "result"; title: string; detail: string; state?: "done" | "running" };
 type ToolCall = { id: string; name: string; input: string; state: "running" | "done" | "error"; result?: string };
 type Usage = { input: number; output: number; cache: number; cost: number };
 type MessageImage = { id: string; name: string; mediaType: string; dataUrl: string };
 type DraftImage = MessageImage & { size: number; data: string };
 type QueuedTurn = { id: string; body: string; images: DraftImage[]; createdAt: number; state?: "queued" | "steering" | "steered" };
-type Message = { id: string; role: "user" | "assistant"; body: string; images?: MessageImage[]; timeline?: TimelineItem[]; tools?: ToolCall[]; processOpen?: boolean; elapsedMs?: number; usage?: { input: number; output: number; cache: number; cost: number } };
+type Message = { id: string; role: "user" | "assistant"; body: string; images?: MessageImage[]; timeline?: TimelineItem[]; tools?: ToolCall[]; processOpen?: boolean; elapsedMs?: number; usage?: { input: number; output: number; cache: number; cost: number }; provider?: ProviderKind; model?: string };
 type PermissionMode = "plan" | "manual" | "acceptEdits" | "auto" | "dontAsk";
 type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 type Session = {
   id: string;
   title: string;
   projectPath: string;
+  provider: ProviderKind;
   model: string;
   permissionMode: PermissionMode;
   effort: EffortLevel;
@@ -26,6 +28,8 @@ type Session = {
   messages: Message[];
   usage: Usage;
 };
+type DeepSeekProviderState = { configured: boolean; source: "memory" | "environment" | "secure-store" | null; sourceLabel?: string | null; secureStorage: boolean; baseUrl?: string; models?: string[]; balanceAvailable?: boolean | null };
+type DeepSeekSetupState = { open: boolean; sessionId: string; key: string; showKey: boolean; remember: boolean; busy: boolean; error: string; connected: boolean; provider: DeepSeekProviderState | null };
 type Provider = {
   id: string;
   name: string;
@@ -113,7 +117,26 @@ const IMAGE_ACCEPT = "image/jpeg,image/png,image/gif,image/webp";
 const MAX_IMAGES_PER_MESSAGE = 10;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
-const REQUIRED_BRIDGE_PROTOCOL = 9;
+const REQUIRED_BRIDGE_PROTOCOL = 10;
+const DEEPSEEK_MODEL_OPTIONS: Array<{ value: string; label: string; badge: string; description: string }> = [
+  { value: "deepseek-v4-pro[1m]", label: "V4 Pro", badge: "P", description: "复杂编码、深度推理、大型项目" },
+  { value: "deepseek-v4-flash", label: "V4 Flash", badge: "F", description: "日常编码、快速响应、低成本任务" },
+];
+const DEEPSEEK_SOURCE_LABEL: Record<string, string> = { memory: "本次启动", environment: "环境变量", "secure-store": "Windows 安全存储" };
+// 五档交互在 DeepSeek 侧只有 high/max 两档（PRD 4.4），UI 明文说明，不伪造五种真实能力。
+const DEEPSEEK_EFFORT_MAP: Record<EffortLevel, "high" | "max"> = { low: "high", medium: "high", high: "high", xhigh: "max", max: "max" };
+const DEEPSEEK_IMAGES_SUPPORTED = false; // 需端到端验证官方端点图片能力；验证通过前禁用并明确提示（PRD 8.3）
+
+function modelLabel(model: string) {
+  return MODEL_OPTIONS.find((option) => option.value === model)?.label
+    || DEEPSEEK_MODEL_OPTIONS.find((option) => option.value === model)?.label
+    || model.replace(/\[1m\]$/, "");
+}
+
+function modelShortLabel(model: string) {
+  const label = modelLabel(model);
+  return label === "V4 Pro" || label === "V4 Flash" ? `${label}${model.includes("[1m]") ? " ·1M" : ""}` : label;
+}
 
 function readDraftImage(file: File): Promise<DraftImage> {
   return new Promise((resolvePromise, reject) => {
@@ -152,9 +175,18 @@ const welcome: Message = {
 
 function makeSession(id: string, title: string, projectPath = ""): Session {
   return {
-    id, title, projectPath, model: "sonnet", permissionMode: "plan", effort: "medium", claudeSessionId: null,
+    id, title, projectPath, provider: "claude", model: "sonnet", permissionMode: "plan", effort: "medium", claudeSessionId: null,
     draft: "", sending: false, messages: [welcome], usage: { input: 0, output: 0, cache: 0, cost: 0 },
   };
+}
+
+function normalizeProvider(provider: unknown): ProviderKind {
+  return provider === "deepseek" ? "deepseek" : "claude";
+}
+
+function normalizeModel(provider: ProviderKind, model: string | undefined): string {
+  if (provider === "deepseek") return DEEPSEEK_MODEL_OPTIONS.some((option) => option.value === model as string) ? (model as string) : "deepseek-v4-pro[1m]";
+  return MODEL_OPTIONS.some((option) => option.value === model as string) ? (model as string) : "sonnet";
 }
 
 function normalizeWorkspacePath(path: string) {
@@ -243,12 +275,19 @@ function PermissionControl({ value, sending, onChange }: { value: PermissionMode
   </details>;
 }
 
-function ClaudeSettingsControl({ model, effort, sending, onModelChange, onEffortChange }: { model: string; effort: EffortLevel; sending: boolean; onModelChange: (value: string) => void; onEffortChange: (value: EffortLevel) => void }) {
-  const selectedModel = MODEL_OPTIONS.find((option) => option.value === model) || MODEL_OPTIONS[0];
+function ClaudeSettingsControl({ provider, model, effort, sending, deepseekConfigured, onProviderChange, onConfigureDeepSeek, onModelChange, onEffortChange }: {
+  provider: ProviderKind; model: string; effort: EffortLevel; sending: boolean; deepseekConfigured: boolean;
+  onProviderChange: (provider: ProviderKind) => void; onConfigureDeepSeek: () => void;
+  onModelChange: (value: string) => void; onEffortChange: (value: EffortLevel) => void;
+}) {
+  const deepSeek = provider === "deepseek";
+  const selectedModel = deepSeek
+    ? DEEPSEEK_MODEL_OPTIONS.find((option) => option.value === model) || DEEPSEEK_MODEL_OPTIONS[0]
+    : MODEL_OPTIONS.find((option) => option.value === model) || MODEL_OPTIONS[0];
   const selectedEffort = EFFORT_OPTIONS.find((option) => option.value === effort) || EFFORT_OPTIONS[1];
   const effortIndex = Math.max(0, EFFORT_OPTIONS.findIndex((option) => option.value === selectedEffort.value));
   const effortStep = 100 / Math.max(1, EFFORT_OPTIONS.length - 1);
-  const [panel, setPanel] = useState<"quick" | "main" | "model" | "effort">("quick");
+  const [panel, setPanel] = useState<"quick" | "main" | "provider" | "model" | "effort">("quick");
   const [sliderActive, setSliderActive] = useState(false);
   const [sliderValue, setSliderValue] = useState(effortIndex * effortStep);
   const sliderValueRef = useRef(effortIndex * effortStep);
@@ -283,30 +322,42 @@ function ClaudeSettingsControl({ model, effort, sending, onModelChange, onEffort
     setSliderActive(false);
     if (EFFORT_OPTIONS[nextIndex].value !== selectedEffort.value) onEffortChange(EFFORT_OPTIONS[nextIndex].value);
   }
+  const modelOptions = deepSeek ? DEEPSEEK_MODEL_OPTIONS : MODEL_OPTIONS;
   return <details className="composer-control claude-settings-control" onToggle={(event) => { keepOnlyOneControlOpen(event); if (event.currentTarget.open) { const snapped = effortIndex * effortStep; setPanel("quick"); setSliderActive(false); sliderValueRef.current = snapped; setSliderValue(snapped); } else settleSlider(); }}>
-    <summary className={`effort-size-${effortIndex}`} title={`选择模型与思考强度：${selectedModel.label} · ${selectedEffort.label}（Ctrl+Shift+M）`}><span className="settings-bolt" aria-hidden="true">✦</span><span>{selectedModel.label} · {selectedEffort.short}</span><i>⌄</i></summary>
+    <summary className={`effort-size-${effortIndex}`} title={`选择模型与思考强度：${selectedModel.label} · ${selectedEffort.label}（Ctrl+Shift+M）`}><span className="settings-bolt" aria-hidden="true">{deepSeek ? "D" : "✦"}</span><span>{selectedModel.label} · {selectedEffort.short}</span><i>⌄</i></summary>
     <div className={`control-popover claude-settings-popover panel-${panel}`}>
       {panel === "quick" ? <div className={`effort-quick-panel ${sliderActive ? "adjusting" : ""}`}>
-        <div className="effort-quick-heading">{sliderActive ? <><span>更高效</span><span>更智能</span></> : <><button type="button" onClick={() => setPanel("main")}>高级 <i>›</i></button><b aria-hidden="true">✦</b></>}</div>
+        <div className="effort-quick-heading">{sliderActive ? <><span>更高效</span><span>更智能</span></> : <><button type="button" onClick={() => setPanel("main")}>高级 <i>›</i></button><b aria-hidden="true">{deepSeek ? "D" : "✦"}</b></>}</div>
         <div className="ion-slider">
           <span className="ion-slider-start-cap" aria-hidden="true"/>
           <span className="ion-slider-fill" style={{ clipPath: `inset(0 ${100 - sliderValue}% 0 0)` }}><span className="ion-particles" aria-hidden="true">{Array.from({ length: 14 }, (_, index) => <i key={index}/>)}</span></span>
           <span className="ion-slider-stops" aria-hidden="true">{EFFORT_OPTIONS.map((option, index) => <i className={index * effortStep <= sliderValue ? "passed" : ""} key={option.value}/>)}</span>
           <input type="range" min="0" max="100" step="0.1" value={sliderValue} aria-label="快速调整思考强度" aria-valuetext={selectedEffort.label} onChange={(event) => updateSlider(Number(event.currentTarget.value))} onKeyDown={(event) => { const direction = event.key === "ArrowRight" || event.key === "ArrowUp" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowDown" ? -1 : 0; if (direction) { event.preventDefault(); updateSlider(Math.round(sliderValue / effortStep) * effortStep + direction * effortStep); settleSlider(); } }} onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); setSliderActive(true); }} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); settleSlider(); }} onPointerCancel={settleSlider} onBlur={settleSlider}/>
         </div>
+        {deepSeek && <p className="mapping-note">档位映射：快速 / 标准 / 深入 → high · 极强 / 最大 → max</p>}
       </div> : panel === "main" ? <>
         <div className="settings-overview">
+          <button type="button" onClick={() => setPanel("provider")}><span>提供商</span><b>{deepSeek ? "DeepSeek" : "Claude"}</b><i>›</i></button>
           <button type="button" onClick={() => setPanel("model")}><span>模型</span><b>{selectedModel.label}</b><i>›</i></button>
           <button type="button" onClick={() => setPanel("effort")}><span>思考强度</span><b>{selectedEffort.label}</b><i>›</i></button>
         </div>
-        <footer>{sending ? "更改将从下一轮推理生效" : "这些设置仅作用于当前 Claude Code 会话"}</footer>
+        <footer>{sending ? "更改将从下一轮推理生效" : deepSeek ? "DeepSeek 通过 Claude Code 驱动，设置仅作用于当前会话" : "这些设置仅作用于当前 Claude Code 会话"}</footer>
       </> : <>
-        <header className="settings-subheader"><button type="button" aria-label="返回会话设置" onClick={() => setPanel("main")}>‹</button><span><strong>{panel === "model" ? "选择模型" : "思考强度"}</strong><small>{panel === "model" ? "选择下一轮使用的 Claude 模型" : "控制后续任务的推理投入"}</small></span></header>
-        <div>{panel === "model" ? MODEL_OPTIONS.map((option) => <button type="button" className={option.value === model ? "selected" : ""} key={option.value} onClick={() => { onModelChange(option.value); setPanel("main"); }}>
+        <header className="settings-subheader"><button type="button" aria-label="返回会话设置" onClick={() => setPanel("main")}>‹</button><span><strong>{panel === "provider" ? "选择提供商" : panel === "model" ? "选择模型" : "思考强度"}</strong><small>{panel === "provider" ? "按会话选择 Claude 或 DeepSeek 驱动" : panel === "model" ? `选择下一轮使用的${deepSeek ? " DeepSeek" : " Claude"} 模型` : deepSeek ? "DeepSeek 档位映射为 high / max" : "控制后续任务的推理投入"}</small></span></header>
+        {panel === "provider" ? <div>
+          <button type="button" className={provider === "claude" ? "selected" : ""} onClick={() => { onProviderChange("claude"); setPanel("main"); }}>
+            <span className="model-option-icon"><i aria-hidden="true"/>C</span><span><strong>Claude</strong><small>使用现有 Claude 登录、Anthropic、Bedrock、Vertex 或用户自定义网关配置</small></span>{provider === "claude" && <b>✓</b>}
+          </button>
+          <button type="button" className={deepSeek ? "selected" : ""} onClick={() => { if (!deepseekConfigured) { onConfigureDeepSeek(); return; } onProviderChange("deepseek"); setPanel("main"); }}>
+            <span className="model-option-icon"><i aria-hidden="true"/>D</span><span><strong>DeepSeek</strong><small>{deepseekConfigured ? "通过 DeepSeek Anthropic API 驱动 Claude Code · 已连接" : "通过 DeepSeek Anthropic API 驱动 Claude Code · 尚未配置"}</small></span>{deepSeek && <b>✓</b>}
+          </button>
+          {!deepseekConfigured && <button type="button" className="provider-configure" onClick={onConfigureDeepSeek}><span>连接 DeepSeek API</span><small>粘贴一次 API Key，可在本机安全保存或仅本次启动</small><i>›</i></button>}
+        </div> : <div>{panel === "model" ? modelOptions.map((option) => <button type="button" className={option.value === model ? "selected" : ""} key={option.value} onClick={() => { onModelChange(option.value); setPanel("main"); }}>
           <span className="model-option-icon"><i aria-hidden="true"/>{option.badge}</span><span><strong>{option.label}</strong><small>{option.description}</small></span>{option.value === model && <b>✓</b>}
         </button>) : EFFORT_OPTIONS.map((option, optionIndex) => <button type="button" className={option.value === effort ? "selected" : ""} key={option.value} onClick={() => { const snapped = optionIndex * effortStep; onEffortChange(option.value); sliderValueRef.current = snapped; setSliderValue(snapped); setPanel("main"); }}>
           <span className="effort-option-bars">{[1,2,3,4,5].map((bar) => <i className={bar <= option.bars ? "on" : ""} key={bar}/>)}</span><span><strong>{option.label}</strong><small>{option.description}</small></span>{option.value === effort && <b>✓</b>}
-        </button>)}</div>
+        </button>)}</div>}
+        {panel === "effort" && deepSeek && <p className="mapping-note">五种交互档位实际映射为两档：<b>快速 / 标准 / 深入 → high</b>，<b>极强 / 最大 → max</b>。</p>}
       </>}
     </div>
   </details>;
@@ -486,6 +537,7 @@ export default function Home() {
   const [workspaceNotice, setWorkspaceNotice] = useState("");
   const [usageProviderOpen, setUsageProviderOpen] = useState<string>("deepseek");
   const [listeningSessionId, setListeningSessionId] = useState<string | null>(null);
+  const [deepseekSetup, setDeepseekSetup] = useState<DeepSeekSetupState>({ open: false, sessionId: "", key: "", showKey: false, remember: true, busy: false, error: "", connected: false, provider: null });
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -498,7 +550,10 @@ export default function Home() {
         if (storedSessions) {
           const parsed = JSON.parse(storedSessions) as { sessions: Session[]; visibleIds: string[]; activeId: string };
           if (parsed.sessions?.length) {
-            setSessions(parsed.sessions.map((session) => ({ ...session, sending: false, draft: session.draft || "", messages: (session.messages || [welcome]).map((message) => ({ ...message, images: undefined })), effort: EFFORT_OPTIONS.some((option) => option.value === session.effort) ? session.effort : "medium", permissionMode: String(session.permissionMode) === "default" ? "manual" : PERMISSION_OPTIONS.some((option) => option.value === session.permissionMode) ? session.permissionMode : "plan" })));
+            setSessions(parsed.sessions.map((session) => {
+              const provider = normalizeProvider(session.provider);
+              return { ...session, provider, model: normalizeModel(provider, session.model), sending: false, draft: session.draft || "", messages: (session.messages || [welcome]).map((message) => ({ ...message, images: undefined })), effort: EFFORT_OPTIONS.some((option) => option.value === session.effort) ? session.effort : "medium", permissionMode: String(session.permissionMode) === "default" ? "manual" : PERMISSION_OPTIONS.some((option) => option.value === session.permissionMode) ? session.permissionMode : "plan" };
+            }));
             setVisibleIds(parsed.visibleIds?.slice(0, 3) || [parsed.sessions[0].id]);
             setActiveId(parsed.activeId || parsed.sessions[0].id);
           }
@@ -602,10 +657,13 @@ export default function Home() {
     cache: total.cache + session.usage.cache,
     cost: total.cost + session.usage.cost,
   }), { input: 0, output: 0, cache: 0, cost: 0 }), [sessions]);
-  const claudeModelUsage = useMemo(() => Object.values(sessions.reduce<Record<string, { model: string; input: number; output: number; cache: number; cost: number }>>((groups, session) => {
-    const key = session.model || "unknown";
-    const current = groups[key] || { model: key, input: 0, output: 0, cache: 0, cost: 0 };
-    groups[key] = { model: key, input: current.input + session.usage.input, output: current.output + session.usage.output, cache: current.cache + session.usage.cache, cost: current.cost + session.usage.cost };
+  // 本机会话账本按 provider + model 分组：DeepSeek 请求绝不记在 Claude 模型下（PRD 5.5）。
+  const sessionModelUsage = useMemo(() => Object.values(sessions.reduce<Record<string, { provider: ProviderKind; model: string; label: string; input: number; output: number; cache: number; cost: number }>>((groups, session) => {
+    const provider = session.provider === "deepseek" ? "deepseek" : "claude";
+    const key = `${provider}:${session.model}`;
+    const label = provider === "deepseek" ? `DeepSeek ${modelShortLabel(session.model)}` : `Claude ${modelShortLabel(session.model)}`;
+    const current = groups[key] || { provider, model: session.model, label, input: 0, output: 0, cache: 0, cost: 0 };
+    groups[key] = { ...current, label, input: current.input + session.usage.input, output: current.output + session.usage.output, cache: current.cache + session.usage.cache, cost: current.cost + session.usage.cost };
     return groups;
   }, {})), [sessions]);
   const activeProjectPath = active?.projectPath || "";
@@ -635,7 +693,20 @@ export default function Home() {
       const id = `session-restored-${Date.now()}`;
       const messages: Message[] = detail.messages.length ? detail.messages.map((message, index) => ({ id: `${id}-history-${index}`, role: message.role, body: message.body })) : [welcome];
       if (detail.truncated) messages.unshift({ id: `${id}-notice`, role: "assistant", body: "这段任务历史较长，当前显示最近的对话；Claude Code 的完整上下文仍会随会话一并恢复。" });
-      const restored: Session = { ...makeSession(id, detail.title, detail.cwd || summary.cwd), model: modelFamily(detail.model), claudeSessionId: detail.id, messages };
+      // 历史模型为 deepseek-v4-* 且 DeepSeek 密钥已配置时按 DeepSeek 恢复；
+      // 密钥未配置则只读打开：不挂 claudeSessionId（不得跨 provider 恢复同一会话），并明确提示。
+      const historyProvider: ProviderKind = /^deepseek-v4-/i.test(detail.model) ? "deepseek" : "claude";
+      let restored: Session;
+      if (historyProvider === "deepseek" && status.deepseekConfigured) {
+        const historyModel = detail.model === "deepseek-v4-flash" ? "deepseek-v4-flash" : "deepseek-v4-pro[1m]";
+        restored = { ...makeSession(id, detail.title, detail.cwd || summary.cwd), provider: "deepseek", model: historyModel, claudeSessionId: detail.id, messages: messages.map((message) => message.id === `${id}-notice` ? message : { ...message, provider: "deepseek", model: historyModel }) };
+      } else if (historyProvider === "deepseek") {
+        restored = { ...makeSession(id, detail.title, detail.cwd || summary.cwd), claudeSessionId: null, messages: [{
+          id: `${id}-provider-notice`, role: "assistant", body: "此历史任务使用 DeepSeek 模型；当前未配置 DeepSeek 密钥，仅恢复历史消息。如需继续会话，请先连接 DeepSeek。",
+        }, ...messages] };
+      } else {
+        restored = { ...makeSession(id, detail.title, detail.cwd || summary.cwd), model: modelFamily(detail.model), claudeSessionId: detail.id, messages };
+      }
       setSessions((current) => [restored, ...current]);
       setVisibleIds((current) => [id, ...current.filter((item) => item !== id)].slice(0, Math.max(1, current.length)));
       setActiveId(id);
@@ -819,6 +890,7 @@ export default function Home() {
         setUsageOpen(false);
         setPreviewImage(null);
         setMobileSidebar(false);
+        closeDeepSeekSetup();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") {
@@ -881,9 +953,90 @@ export default function Home() {
     await recheckStatus();
   }
 
+  function changeSessionProvider(id: string, provider: ProviderKind) {
+    patchSession(id, (session) => ({
+      ...session,
+      provider,
+      model: provider === "deepseek" ? "deepseek-v4-pro[1m]" : "sonnet",
+      // 同一真实 Claude Code 会话不得跨 provider 恢复（PRD 8.1）
+      claudeSessionId: null,
+    }));
+  }
+
+  async function refreshDeepSeekStatus() {
+    void recheckStatus();
+  }
+
+  async function openDeepSeekSetup(sessionId: string) {
+    setWorkspaceNotice("");
+    if ((status.bridgeProtocol || 0) < REQUIRED_BRIDGE_PROTOCOL || !status.capabilities?.includes("deepseek-provider")) {
+      setWorkspaceNotice("当前本地桥接不支持 DeepSeek，请重新启动 CCW。");
+      return;
+    }
+    setDeepseekSetup({ open: true, sessionId, key: "", showKey: false, remember: true, busy: false, error: "", connected: false, provider: null });
+    try {
+      const response = await fetch(api("/api/providers/deepseek"));
+      if (!response.ok) throw new Error("无法读取 DeepSeek 配置状态。");
+      const provider = await response.json() as DeepSeekProviderState;
+      setDeepseekSetup((current) => ({ ...current, provider, connected: provider.configured }));
+    } catch (error) {
+      setDeepseekSetup((current) => ({ ...current, error: error instanceof Error ? error.message : "无法读取 DeepSeek 配置状态，请检查本地桥接。" }));
+    }
+  }
+
+  function closeDeepSeekSetup() {
+    if (deepseekSetup.busy) return;
+    setDeepseekSetup({ open: false, sessionId: "", key: "", showKey: false, remember: true, busy: false, error: "", connected: false, provider: null });
+  }
+
+  async function submitDeepSeekKey() {
+    const key = deepseekSetup.key.trim();
+    const sessionId = deepseekSetup.sessionId;
+    if (!sessionId || deepseekSetup.busy) return;
+    if (!/^sk-[A-Za-z0-9]/.test(key)) {
+      setDeepseekSetup((current) => ({ ...current, error: "API Key 应以 sk- 开头。" }));
+      return;
+    }
+    setDeepseekSetup((current) => ({ ...current, busy: true, error: "正在验证" }));
+    try {
+      const response = await fetch(api("/api/providers/deepseek"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: key, remember: deepseekSetup.remember }),
+      });
+      const payload = await response.json().catch(() => null) as { connected?: boolean; source?: string; balanceAvailable?: boolean; error?: string } | null;
+      if (!response.ok || !payload?.connected) throw new Error(payload?.error || "连接失败，请稍后重试。");
+      void refreshDeepSeekStatus();
+      changeSessionProvider(sessionId, "deepseek");
+      setWorkspaceNotice(payload.balanceAvailable === false ? "DeepSeek 已连接，但账户余额不足。" : "DeepSeek 已连接。");
+      closeDeepSeekSetup();
+    } catch (error) {
+      setDeepseekSetup((current) => ({ ...current, busy: false, error: error instanceof Error ? error.message : "连接失败，请稍后重试。" }));
+    }
+  }
+
+  async function removeDeepSeekSetup() {
+    if (deepseekSetup.busy) return;
+    setDeepseekSetup((current) => ({ ...current, busy: true }));
+    try {
+      const response = await fetch(api("/api/providers/deepseek"), { method: "DELETE" });
+      const payload = await response.json().catch(() => null) as { configured?: boolean; source?: string; message?: string; error?: string } | null;
+      if (!response.ok) throw new Error(payload?.error || "移除失败");
+      void refreshDeepSeekStatus();
+      setDeepseekSetup((current) => ({ ...current, busy: false, connected: Boolean(payload?.configured), error: payload?.message || "已断开 DeepSeek。" }));
+    } catch (error) {
+      setDeepseekSetup((current) => ({ ...current, busy: false, error: error instanceof Error ? error.message : "移除失败，请稍后重试。" }));
+    }
+  }
+
   async function addDraftImages(id: string, incoming: File[]) {
     const files = incoming.filter((file): file is File => file instanceof File);
     if (!files.length) return;
+    // DeepSeek 图片能力未经端到端验证时：明确提示并禁用，绝不静默丢弃（PRD 8.3）
+    if (!DEEPSEEK_IMAGES_SUPPORTED && sessions.find((item) => item.id === id)?.provider === "deepseek") {
+      setImageNotices((current) => ({ ...current, [id]: "当前 DeepSeek 模型暂不支持图片输入。" }));
+      return;
+    }
     const existing = draftImages[id] || [];
     const unsupported = files.find((file) => !IMAGE_MEDIA_TYPES.has(file.type));
     const tooLarge = files.find((file) => file.size > MAX_IMAGE_BYTES);
@@ -929,6 +1082,11 @@ export default function Home() {
     if (!Array.from(event.dataTransfer.types).includes("Files")) return;
     event.preventDefault();
     event.stopPropagation();
+    // 不允许静默丢弃：DeepSeek 会话明确提示并拒绝图片（PRD 8.3）
+    if (!DEEPSEEK_IMAGES_SUPPORTED && sessions.find((item) => item.id === id)?.provider === "deepseek") {
+      setImageNotices((current) => ({ ...current, [id]: "当前 DeepSeek 模型暂不支持图片输入。" }));
+      return;
+    }
     event.dataTransfer.dropEffect = "copy";
     setImageDragSessionId(id);
   }
@@ -1167,6 +1325,12 @@ export default function Home() {
   async function runTurn(id: string, prompt: string, images: DraftImage[], preserveDraft = false) {
     const current = sessions.find((session) => session.id === id);
     if (!current || current.sending) return;
+    const snapshotProvider = current.provider;
+    const snapshotModel = current.model;
+    if (snapshotProvider === "deepseek" && images.length > 0 && !DEEPSEEK_IMAGES_SUPPORTED) {
+      setImageNotices((currentNotices) => ({ ...currentNotices, [id]: "当前 DeepSeek 模型暂不支持图片输入。" }));
+      return;
+    }
     const assistantId = crypto.randomUUID();
     const projectPath = current.projectPath;
     const startedAt = Date.now();
@@ -1180,8 +1344,8 @@ export default function Home() {
     }
     patchSession(id, (session) => ({ ...session, title: autoTitle || session.title, draft: preserveDraft ? session.draft : "", sending: true, messages: [
       ...session.messages,
-      { id: crypto.randomUUID(), role: "user", body: prompt, images: messageImages },
-      { id: assistantId, role: "assistant", body: "", processOpen: true, timeline: [{ kind: "thinking", title: "启动 Claude Code", detail: "建立独立流式会话", state: "running" }] },
+      { id: crypto.randomUUID(), role: "user", body: prompt, images: messageImages, provider: snapshotProvider, model: snapshotModel },
+      { id: assistantId, role: "assistant", body: "", processOpen: true, provider: snapshotProvider, model: snapshotModel, timeline: [{ kind: "thinking", title: "启动 Claude Code", detail: "建立独立流式会话", state: "running" }] },
     ] }));
 
     if (!status.bridge || !status.claudeInstalled) {
@@ -1200,7 +1364,7 @@ export default function Home() {
     try {
       const response = await fetch(api("/api/run"), {
         method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
-        body: JSON.stringify({ prompt, images: images.map(({ name, mediaType, data }) => ({ name, mediaType, data })), cwd: projectPath, model: current.model, permissionMode: current.permissionMode, effort: current.effort, sessionId: current.claudeSessionId, requestId: id }),
+        body: JSON.stringify({ prompt, images: images.map(({ name, mediaType, data }) => ({ name, mediaType, data })), cwd: projectPath, provider: snapshotProvider, model: snapshotModel, permissionMode: current.permissionMode, effort: current.effort, sessionId: current.claudeSessionId, requestId: id }),
       });
       if (!response.ok || !response.body) throw new Error(await response.text() || "本地桥没有返回数据");
       const reader = response.body.getReader();
@@ -1306,6 +1470,7 @@ export default function Home() {
     const summary = turn.body.trim().replace(/\s+/g, " ");
     const nextSession: Session = {
       ...makeSession(newId, summary.slice(0, 28) || `图片任务 ${turn.images.length}`, source.projectPath),
+      provider: source.provider,
       model: source.model,
       permissionMode: source.permissionMode,
       effort: source.effort,
@@ -1353,12 +1518,14 @@ export default function Home() {
           ...current,
           messages: [
             ...closedMessages,
-            { id: insertedUserId, role: "user" as const, body: turn.body, images: insertedImages },
+            { id: insertedUserId, role: "user" as const, body: turn.body, images: insertedImages, provider: current.provider, model: current.model },
             {
               id: continuationAssistantId,
               role: "assistant" as const,
               body: "",
               processOpen: true,
+              provider: current.provider,
+              model: current.model,
               timeline: [{ kind: "thinking" as const, title: "按新消息继续", detail: "Claude Code 已接收插入消息", state: "running" as const }],
             },
           ],
@@ -1518,6 +1685,7 @@ export default function Home() {
   }
 
   const deepseekRequestMax = Math.max(1, ...(deepseekAnalytics?.models.map((item) => item.requests) || [1]));
+  const deepseekUsageProvider = providers.find((item) => item.id === "deepseek") || null;
   const deepseekTokenMax = Math.max(1, ...(deepseekAnalytics?.models.map((item) => item.tokens) || [1]));
   const connectionLabel = !status.bridge ? "本地桥未启动" : !status.claudeInstalled ? "未检测到 Claude Code" : status.claudeVersion || "Claude Code 已连接";
 
@@ -1534,7 +1702,7 @@ export default function Home() {
         <header title={group.path || "尚未选择目录"}><span className="workspace-folder-icon"><UiIcon name="workspace" size={13}/></span><strong>{group.label}</strong><small>{group.sessions.length}</small></header>
         <div>{group.sessions.map((session) => (
           <div className={`session ${activeId === session.id ? "active" : ""}`} key={session.id}>
-            <button onClick={() => openSession(session.id)}><span className="session-title">{session.title}</span><small>{session.sending ? "正在工作" : `${session.model}${(queuedTurns[session.id]?.length || 0) ? ` · 排队 ${queuedTurns[session.id].length}` : ""}`}</small></button>
+            <button onClick={() => openSession(session.id)}><span className="session-title">{session.title}</span><small>{session.sending ? "正在工作" : `${session.provider === "deepseek" ? "D " : ""}${modelShortLabel(session.model)}${(queuedTurns[session.id]?.length || 0) ? ` · 排队 ${queuedTurns[session.id].length}` : ""}`}</small></button>
             <span className="session-actions">
               <button className="split-open" title="并排打开" aria-label={`并排打开 ${session.title}`} onClick={() => openSession(session.id, true)}><UiIcon name="split" size={14}/></button>
               <button className="session-action" title="重命名" aria-label={`重命名 ${session.title}`} onClick={() => renameSession(session.id)}><UiIcon name="edit" size={13}/></button>
@@ -1564,14 +1732,14 @@ export default function Home() {
           const sessionDraftImages = draftImages[id] || [];
           const hasDraftContent = Boolean(session.draft.trim() || sessionDraftImages.length);
           return <section className={`session-pane ${activeId === id ? "active" : ""}`} key={id} onDragOver={(event) => event.preventDefault()} onDrop={() => movePane(id)} onClick={() => setActiveId(id)}>
-            <header className="pane-header" draggable onDragStart={() => setDraggedId(id)}><span className={`run-dot ${session.sending ? "busy" : ""}`}/><div><strong>{session.title}</strong><small>{session.projectPath}</small></div><span className="pane-model">{session.model}</span>{visibleIds.length > 1 && <IconButton label="关闭此窗格" onClick={() => closePane(id)}>×</IconButton>}</header>
+            <header className="pane-header" draggable onDragStart={() => setDraggedId(id)}><span className={`run-dot ${session.sending ? "busy" : ""}`}/><div><strong>{session.title}</strong><small>{session.projectPath}</small></div><span className="pane-model">{session.provider === "deepseek" ? `D ${modelShortLabel(session.model)}` : modelLabel(session.model)}</span>{visibleIds.length > 1 && <IconButton label="关闭此窗格" onClick={() => closePane(id)}>×</IconButton>}</header>
             <div className="conversation" ref={(element) => { conversationRefs.current.set(id, element); }} onScroll={() => handlePaneScroll(id)}><div className="conversation-inner">
               <div className="day-divider"><span>今天</span></div>
-              {session.messages.map((message) => message.role === "user" ? <article className="message user-message" key={message.id}><div className="user-message-content">{message.images && message.images.length > 0 && <div className={`message-image-grid ${message.images.length === 1 ? "single" : "multiple"}`}>{message.images.map((image) => <button type="button" className="message-image" key={image.id} title={`查看 ${image.name}`} onClick={() => setPreviewImage(image)}><img src={image.dataUrl} alt={image.name}/></button>)}</div>}{message.body && <div className="user-bubble">{message.body}</div>}</div></article> : <article className="message assistant-message" key={message.id}><ClaudeMark small/><div className="assistant-content"><div className="message-meta"><strong>Claude</strong><span>Code</span>{message.usage && (message.usage.input + message.usage.output) > 0 && <span className="message-tokens" title={`输入 ${message.usage.input.toLocaleString()} · 输出 ${message.usage.output.toLocaleString()} · 缓存 ${message.usage.cache.toLocaleString()}${message.usage.cost > 0 ? ` · $${message.usage.cost.toFixed(4)}` : ""}`}>▲{formatTokens(message.usage.input)} ▼{formatTokens(message.usage.output)}</span>}{message.elapsedMs !== undefined && <span className="message-elapsed">⏱ {formatElapsed(message.elapsedMs)}</span>}</div>
+              {session.messages.map((message) => message.role === "user" ? <article className="message user-message" key={message.id}><div className="user-message-content">{message.images && message.images.length > 0 && <div className={`message-image-grid ${message.images.length === 1 ? "single" : "multiple"}`}>{message.images.map((image) => <button type="button" className="message-image" key={image.id} title={`查看 ${image.name}`} onClick={() => setPreviewImage(image)}><img src={image.dataUrl} alt={image.name}/></button>)}</div>}{message.body && <div className="user-bubble">{message.body}</div>}</div></article> : <article className="message assistant-message" key={message.id}>{message.provider === "deepseek" ? <span className="deepseek-mark small" aria-hidden="true">D</span> : <ClaudeMark small/>}<div className="assistant-content"><div className="message-meta"><strong>{message.provider === "deepseek" ? "DeepSeek" : "Claude"}</strong><span>{message.provider === "deepseek" ? "· Claude Code" : "Code"}</span>{message.usage && (message.usage.input + message.usage.output) > 0 && <span className="message-tokens" title={`输入 ${message.usage.input.toLocaleString()} · 输出 ${message.usage.output.toLocaleString()} · 缓存 ${message.usage.cache.toLocaleString()}${message.usage.cost > 0 ? ` · $${message.usage.cost.toFixed(4)}` : ""}`}>▲{formatTokens(message.usage.input)} ▼{formatTokens(message.usage.output)}</span>}{message.elapsedMs !== undefined && <span className="message-elapsed">⏱ {formatElapsed(message.elapsedMs)}</span>}</div>
                 {message.body && <p>{message.body}</p>}
                 <ProcessFlow message={message} onToggle={() => patchSession(id, (item) => ({ ...item, messages: item.messages.map((entry) => entry.id === message.id ? { ...entry, processOpen: !entry.processOpen } : entry) }))}/>
               </div></article>)}
-              {session.sending && <div className="working"><span/><span/><span/> Claude 正在工作</div>}
+              {session.sending && <div className="working"><span/><span/><span/> {session.provider === "deepseek" ? "DeepSeek 正在通过 Claude Code 工作" : "Claude 正在工作"}</div>}
             </div></div>
             <form className={`composer-wrap ${imageDragSessionId === id ? "image-dragging" : ""}`} onSubmit={(event) => submit(event, id)} onDragEnter={(event) => handleImageDrag(event, id)} onDragOver={(event) => handleImageDrag(event, id)} onDragLeave={(event) => handleImageDragLeave(event, id)} onDrop={(event) => handleImageDrop(event, id)}>
               {(queuedTurns[id]?.length || 0) > 0 && <div className="queued-turns" aria-label={`${queuedTurns[id].length} 条排队消息`}>{queuedTurns[id].map((turn, index) => {
@@ -1591,7 +1759,7 @@ export default function Home() {
                   </div>
                 </article>;
               })}</div>}
-              <div className="composer">{imageDragSessionId === id && <div className="composer-drop-overlay"><span><UiIcon name="plus"/></span><strong>松开以添加多张图片</strong><small>JPG、PNG、GIF、WebP</small></div>}{sessionDraftImages.length > 0 && <div className="draft-image-rail" aria-label={`已添加 ${sessionDraftImages.length} 张图片`}>{sessionDraftImages.map((image) => <div className="draft-image" key={image.id}><button type="button" className="draft-image-preview" title={`查看 ${image.name}`} onClick={() => setPreviewImage(image)}><img src={image.dataUrl} alt={image.name}/></button><button type="button" className="draft-image-remove" aria-label={`移除 ${image.name}`} onClick={() => removeDraftImage(id, image.id)}>×</button></div>)}</div>}<textarea value={session.draft} onChange={(event) => { if (speechSessionIdRef.current === id) cancelVoiceInput(); patchSession(id, (item) => ({ ...item, draft: event.target.value })); }} onPaste={(event) => handleImagePaste(event, id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={session.sending ? "继续输入；发送后可选择立即调整方向…" : sessionDraftImages.length ? "补充说明，或直接发送图片…" : "让 Claude 修改代码、运行命令、解释项目或分析图片…"} rows={2}/>{imageNotices[id] && <div className="image-notice" role="status">{imageNotices[id]}</div>}<div className="composer-toolbar"><div className="toolbar-left"><label className="add-context image-picker" title="上传图片（支持一次选择多张）" aria-label="上传图片"><input type="file" accept={IMAGE_ACCEPT} multiple onChange={(event) => { const files = Array.from(event.currentTarget.files || []); event.currentTarget.value = ""; void addDraftImages(id, files); }}/><span><UiIcon name="plus" size={16}/></span></label><PermissionControl value={session.permissionMode} sending={session.sending} onChange={(permissionMode) => patchSession(id, (item) => ({ ...item, permissionMode }))}/></div><div className="composer-actions"><ClaudeSettingsControl model={session.model} effort={session.effort} sending={session.sending} onModelChange={(model) => patchSession(id, (item) => ({ ...item, model }))} onEffortChange={(effort) => patchSession(id, (item) => ({ ...item, effort }))}/><button type="button" className={`voice-button ${listeningSessionId === id ? "listening" : ""}`} aria-pressed={listeningSessionId === id} title={listeningSessionId === id ? "停止语音输入" : "语音转文字"} aria-label={listeningSessionId === id ? "停止语音输入" : "开始语音转文字"} onClick={() => toggleVoiceInput(id)}><UiIcon name="microphone" size={17}/><span className="voice-listening-dot" aria-hidden="true"/></button>{session.sending ? <>{hasDraftContent && <button className="send-button queue-send" title="加入排队" aria-label="加入排队"><UiIcon name="send" size={15}/></button>}<button type="button" className="stop-button" disabled={stoppingSessionIds.has(id)} title={stoppingSessionIds.has(id) ? "正在停止…" : "停止当前任务"} aria-label={stoppingSessionIds.has(id) ? "正在停止当前任务" : "停止当前任务"} onClick={() => void stopSession(id)}><UiIcon name="stop" size={14}/></button></> : <button className="send-button" disabled={!hasDraftContent} title="发送" aria-label="发送"><UiIcon name="send" size={15}/></button>}</div></div></div>
+              <div className="composer">{imageDragSessionId === id && <div className="composer-drop-overlay"><span><UiIcon name="plus"/></span><strong>松开以添加多张图片</strong><small>JPG、PNG、GIF、WebP</small></div>}{sessionDraftImages.length > 0 && <div className="draft-image-rail" aria-label={`已添加 ${sessionDraftImages.length} 张图片`}>{sessionDraftImages.map((image) => <div className="draft-image" key={image.id}><button type="button" className="draft-image-preview" title={`查看 ${image.name}`} onClick={() => setPreviewImage(image)}><img src={image.dataUrl} alt={image.name}/></button><button type="button" className="draft-image-remove" aria-label={`移除 ${image.name}`} onClick={() => removeDraftImage(id, image.id)}>×</button></div>)}</div>}<textarea value={session.draft} onChange={(event) => { if (speechSessionIdRef.current === id) cancelVoiceInput(); patchSession(id, (item) => ({ ...item, draft: event.target.value })); }} onPaste={(event) => handleImagePaste(event, id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={session.sending ? "继续输入；发送后可选择立即调整方向…" : sessionDraftImages.length ? "补充说明，或直接发送图片…" : `让 ${session.provider === "deepseek" ? "DeepSeek 通过 Claude Code" : "Claude"} 修改代码、运行命令、解释项目或分析图片…`} rows={2}/>{imageNotices[id] && <div className="image-notice" role="status">{imageNotices[id]}</div>}<div className="composer-toolbar"><div className="toolbar-left">{session.provider === "deepseek" && !DEEPSEEK_IMAGES_SUPPORTED ? <button type="button" className="add-context image-picker is-disabled" title="当前 DeepSeek 模型暂不支持图片输入" aria-label="当前 DeepSeek 模型暂不支持图片输入" onClick={() => setImageNotices((current) => ({ ...current, [id]: "当前 DeepSeek 模型暂不支持图片输入。" }))}><span><UiIcon name="plus" size={16}/></span></button> : <label className="add-context image-picker" title="上传图片（支持一次选择多张）" aria-label="上传图片"><input type="file" accept={IMAGE_ACCEPT} multiple onChange={(event) => { const files = Array.from(event.currentTarget.files || []); event.currentTarget.value = ""; void addDraftImages(id, files); }}/><span><UiIcon name="plus" size={16}/></span></label>}<PermissionControl value={session.permissionMode} sending={session.sending} onChange={(permissionMode) => patchSession(id, (item) => ({ ...item, permissionMode }))}/></div><div className="composer-actions"><ClaudeSettingsControl provider={session.provider} model={session.model} effort={session.effort} sending={session.sending} deepseekConfigured={Boolean(status.deepseekConfigured)} onProviderChange={(provider) => changeSessionProvider(id, provider)} onConfigureDeepSeek={() => void openDeepSeekSetup(id)} onModelChange={(model) => patchSession(id, (item) => ({ ...item, model, claudeSessionId: null }))} onEffortChange={(effort) => patchSession(id, (item) => ({ ...item, effort }))}/><button type="button" className={`voice-button ${listeningSessionId === id ? "listening" : ""}`} aria-pressed={listeningSessionId === id} title={listeningSessionId === id ? "停止语音输入" : "语音转文字"} aria-label={listeningSessionId === id ? "停止语音输入" : "开始语音转文字"} onClick={() => toggleVoiceInput(id)}><UiIcon name="microphone" size={17}/><span className="voice-listening-dot" aria-hidden="true"/></button>{session.sending ? <>{hasDraftContent && <button className="send-button queue-send" title="加入排队" aria-label="加入排队"><UiIcon name="send" size={15}/></button>}<button type="button" className="stop-button" disabled={stoppingSessionIds.has(id)} title={stoppingSessionIds.has(id) ? "正在停止…" : "停止当前任务"} aria-label={stoppingSessionIds.has(id) ? "正在停止当前任务" : "停止当前任务"} onClick={() => void stopSession(id)}><UiIcon name="stop" size={14}/></button></> : <button className="send-button" disabled={!hasDraftContent} title="发送" aria-label="发送"><UiIcon name="send" size={15}/></button>}</div></div></div>
             </form>
           </section>;
         })}</div>
@@ -1680,12 +1848,34 @@ export default function Home() {
       <footer><span>仅从本机 <code>~/.claude/projects</code> 读取，不会上传历史内容。</span><button onClick={() => void openHistory()} disabled={historyLoading}>刷新</button></footer>
     </section></div>}
 
+    {deepseekSetup.open && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDeepSeekSetup(); }}><section className="deepseek-modal" role="dialog" aria-modal="true" aria-labelledby="deepseek-setup-title">
+      <header><div><span className="eyebrow">DEEPSEEK PROVIDER</span><h2 id="deepseek-setup-title">连接 DeepSeek API</h2><p>密钥只发送到 127.0.0.1 本机桥接器，用于验证并驱动本机 Claude Code。错误信息不会包含完整 Key。</p></div><IconButton label="关闭 DeepSeek 配置" onClick={closeDeepSeekSetup}>×</IconButton></header>
+      {deepseekSetup.connected && deepseekSetup.provider ? <div className="deepseek-connected">
+        <div className="deepseek-connected-state"><span className="provider-state ready">已连接</span><p>凭据来源：{deepseekSetup.provider.sourceLabel || DEEPSEEK_SOURCE_LABEL[deepseekSetup.provider.source || ""] || "本机"}<br/><small>端点：{deepseekSetup.provider.baseUrl || "https://api.deepseek.com/anthropic"}</small></p></div>
+        <div className="deepseek-modal-actions">
+          <button type="button" className="primary" disabled={deepseekSetup.busy} onClick={() => setDeepseekSetup((current) => ({ ...current, connected: false, provider: null, key: "", error: "" }))}>替换密钥</button>
+          <button type="button" className="danger" disabled={deepseekSetup.busy} onClick={() => void removeDeepSeekSetup()}>{deepseekSetup.busy ? "正在移除…" : "移除配置"}</button>
+          <button type="button" className="secondary" disabled={deepseekSetup.busy} onClick={closeDeepSeekSetup}>关闭</button>
+        </div>
+        {deepseekSetup.error && <p className="deepseek-setup-status" role="status">{deepseekSetup.error}</p>}
+      </div> : <>
+        <label className="deepseek-key-row"><span>DeepSeek API Key</span><div className="deepseek-key-input"><input type={deepseekSetup.showKey ? "text" : "password"} value={deepseekSetup.key} autoFocus placeholder="sk-…" aria-label="DeepSeek API Key" onChange={(event) => setDeepseekSetup((current) => ({ ...current, key: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submitDeepSeekKey(); } }}/><button type="button" className="deepseek-reveal" aria-label={deepseekSetup.showKey ? "隐藏密钥" : "显示密钥"} onClick={() => setDeepseekSetup((current) => ({ ...current, showKey: !current.showKey }))}>{deepseekSetup.showKey ? "隐藏" : "显示"}</button></div></label>
+        <label className="deepseek-remember"><input type="checkbox" checked={deepseekSetup.remember} onChange={(event) => setDeepseekSetup((current) => ({ ...current, remember: event.target.checked }))}/><span>使用 Windows 当前账户安全保存（关闭电脑后仍可复用；取消勾选则仅本次启动）</span></label>
+        <div className="deepseek-modal-actions">
+          <button type="button" className="primary" disabled={deepseekSetup.busy} onClick={() => void submitDeepSeekKey()}>{deepseekSetup.busy ? "正在验证…" : "验证并连接"}</button>
+          <button type="button" className="secondary" disabled={deepseekSetup.busy} onClick={closeDeepSeekSetup}>取消</button>
+        </div>
+        <p className="deepseek-setup-hint"><a href="https://platform.deepseek.com" target="_blank" rel="noreferrer">前往 DeepSeek Platform 创建 API Key ↗</a><small>密钥不会进入浏览器存储、会话记录、日志或发布包。</small></p>
+      </>}
+      {deepseekSetup.error && !deepseekSetup.connected && <p className="deepseek-setup-status" role="status">{deepseekSetup.busy ? "正在验证…" : deepseekSetup.error}</p>}
+    </section></div>}
+
     {usageOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setUsageOpen(false); }}><section className="usage-modal analytics-modal" role="dialog" aria-modal="true" aria-label="用量与额度">
       <header className="analytics-header"><div><span className="eyebrow">USAGE & COST</span><h2>用量与额度</h2><p>按模型核对请求、Tokens 与费用。密钥始终留在本机。</p></div><IconButton label="关闭" onClick={() => setUsageOpen(false)}>×</IconButton></header>
 
       <div className="provider-accordion-list">
       <details className="provider-accordion deepseek-interface" open={usageProviderOpen === "deepseek"}>
-        <summary onClick={(event) => { event.preventDefault(); setUsageProviderOpen((current) => current === "deepseek" ? "" : "deepseek"); }}><div className="provider-summary-main"><div className="provider-logo deepseek">D</div><div><strong>DeepSeek API</strong><span>余额、消费、请求和模型 Tokens</span></div></div><div className="provider-summary-side"><span className="provider-state ready">已连接</span><b>⌄</b></div></summary>
+        <summary onClick={(event) => { event.preventDefault(); setUsageProviderOpen((current) => current === "deepseek" ? "" : "deepseek"); }}><div className="provider-summary-main"><div className="provider-logo deepseek">D</div><div><strong>DeepSeek API</strong><span>余额、消费、请求和模型 Tokens</span></div></div><div className="provider-summary-side"><span className={`provider-state ${deepseekUsageProvider?.configured ? deepseekUsageProvider.state : "missing"}`}>{deepseekUsageProvider?.configured ? deepseekUsageProvider.state === "ready" ? "已连接" : "受限" : "未配置"}</span><b>⌄</b></div></summary>
         <div className="provider-interface-body">
       <div className="analytics-toolbar" data-usage-part="filters">
         <div className="time-filter" title="DeepSeek 平台快照仅包含近 30 天数据"><span>时间维度</span><strong>近 30 天</strong></div>
@@ -1726,7 +1916,7 @@ export default function Home() {
       <details className="provider-accordion claude-interface" open={usageProviderOpen === "claude"}>
         <summary onClick={(event) => { event.preventDefault(); setUsageProviderOpen((current) => current === "claude" ? "" : "claude"); }}><div className="provider-summary-main"><div className="provider-logo claude">C</div><div><strong>Claude Code</strong><span>本客户端逐会话模型账本</span></div></div><div className="provider-summary-side"><span className="provider-state ready">本机记录</span><b>⌄</b></div></summary>
         <div className="provider-interface-body"><section className="local-ledger" data-usage-part="local"><div><span className="eyebrow">LOCAL LEDGER</span><h3>Claude Code 模型用量</h3><p>来自 Claude Code 返回的真实 Token 与 API 成本，只在这台设备累计。</p></div><div className="ledger-values"><span><b>{(localUsage.input + localUsage.output).toLocaleString()}</b> Tokens</span><span><b>{localUsage.input.toLocaleString()} / {localUsage.output.toLocaleString()}</b> 输入 / 输出</span><span><b>${localUsage.cost.toFixed(4)}</b> API 成本</span></div></section>
-          <div className="claude-model-list">{claudeModelUsage.map((item) => <article key={item.model}><div><strong>Claude {item.model}</strong><span>{item.input + item.output > 0 ? "已记录" : "等待首次调用"}</span></div><p><b>{(item.input + item.output).toLocaleString()}</b> Tokens</p><small>输入 {item.input.toLocaleString()} · 输出 {item.output.toLocaleString()} · 缓存 {item.cache.toLocaleString()} · ${item.cost.toFixed(4)}</small></article>)}</div>
+          <div className="claude-model-list">{sessionModelUsage.map((item) => <article key={`${item.provider}-${item.model}`}><div><strong>{item.label}</strong><span>{item.input + item.output > 0 ? "已记录" : "等待首次调用"}</span></div><p><b>{(item.input + item.output).toLocaleString()}</b> Tokens</p><small>输入 {item.input.toLocaleString()} · 输出 {item.output.toLocaleString()} · 缓存 {item.cache.toLocaleString()} · ${item.cost.toFixed(4)}</small></article>)}</div>
         </div>
       </details>
 
@@ -1736,7 +1926,7 @@ export default function Home() {
       </details>)}
       </div>
         <div className="usage-heading bottom-refresh"><strong>接口状态</strong><button onClick={refreshUsage} disabled={usageLoading}>{usageLoading ? "检测中…" : "重新检测全部接口"}</button></div>
-      <footer><span>DeepSeek 普通 API Key 只能查询余额；模型历史来自官方平台快照，客户端不会伪造缺失的逐日或缓存拆分数据。</span><code>{deepseekAnalytics?.updatedAt ? `更新于 ${new Date(deepseekAnalytics.updatedAt).toLocaleString("zh-CN")}` : "DEEPSEEK_API_KEY"}</code></footer>
+      <footer><span>DeepSeek 作为推理提供商经本机桥接驱动 Claude Code；模型历史来自官方平台快照，本机会话账本由客户端按提供商与模型累计。</span><code>{deepseekAnalytics?.updatedAt ? `更新于 ${new Date(deepseekAnalytics.updatedAt).toLocaleString("zh-CN")}` : "未配置"}</code></footer>
     </section></div>}
   </main>;
 }

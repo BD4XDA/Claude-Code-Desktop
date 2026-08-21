@@ -2,6 +2,17 @@
 
 ## 2026-08-21
 
+### DeepSeek 原生提供商（Claude Code White 1.1）
+- **按会话切换推理提供商**：会话底部设置「高级 → 提供商」可在 Claude（沿用现有登录 / Anthropic / Bedrock / Vertex / 自定义网关）与 DeepSeek 之间逐会话选择；两个并行窗格可用不同提供商，切换时自动清空旧后端会话恢复，绝不跨提供商恢复同一个 Claude Code 会话。
+- **DeepSeek V4 Pro / V4 Flash**：通过官方 Anthropic 兼容端点（`https://api.deepseek.com/anthropic`）+ 本机 Claude Code 驱动，无惧旧模型名停用；子进程注入独立环境变量（`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` 等），不修改系统环境变量、注册表或用户全局设置。
+- **本机密钥安全存储**：粘贴一次 DeepSeek API Key，可选 Windows 当前账户安全保存（DPAPI 加密，`%LOCALAPPDATA%\ClaudeCodeWhite\deepseek-api-key.dpapi`，仅当前用户可解密），或仅本次启动（只存在桥接器内存）；密钥写入前由官方余额接口验证，失败不会覆盖旧密钥。状态接口只返回配置来源（本次启动 / 环境变量 / Windows 安全存储），绝不返回 Key。
+- **本机接口防护升级**：所有写接口在读取请求体前显式校验 Origin 必须为本机来源，非本机网页直接 403（不依赖 CORS 头拦截）；密钥日志脱敏覆盖 `sk-` 后的所有非空白/引号字符；桥接协议升级至 10（`deepseek-provider` / `secure-provider-store`）。
+- **思考强度透明映射**：五档交互在 DeepSeek 侧映射为两档（快速 / 标准 / 深入 → `high`；极强 / 最大 → `max`），界面明文说明，不伪造五种真实能力。
+- **消息归属与账本**：每条回复按发送时快照显示来源（`DeepSeek · Claude Code` / D 徽章 / Claude 标记）；本机会话账本按提供商 + 模型分组，DeepSeek 消耗不再记在 Claude 模型下。
+- **图片输入明确降级**：DeepSeek 图片能力完成端到端验证前，DeepSeek 会话禁用图片选择、拖拽与粘贴，并提示「当前 DeepSeek 模型暂不支持图片输入」，不静默丢弃；Claude 会话不受影响。
+- **历史恢复兼容**：历史模型为 `deepseek-v4-*` 且已配置密钥时按 DeepSeek 恢复；未配置密钥时以只读方式打开并提示先连接。
+- 修复遗留：Windows 下 PowerShell 不在 PATH 时 DPAPI 存储优先按 `SystemRoot` 绝对路径查找 `powershell.exe`。
+
 ### CCW 新功能
 - **多图片对话输入**：每个会话输入框均支持一次选择多张图片，也可批量拖入或直接粘贴剪贴板图片；发送前支持缩略图预览、单张移除与大图查看。单轮最多 10 张图片，并提供格式、单张大小和总大小校验。
 - **语音转文字**：输入框底部新增麦克风按钮，可把语音实时写入当前草稿；支持连续识别、停止录音、识别错误提示，并与键盘输入安全切换。

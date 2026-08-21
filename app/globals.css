@@ -681,3 +681,41 @@ body { font-size: 14px; font-feature-settings: "kern" 1, "liga" 1; text-renderin
 @media (max-width: 560px) {
   .topbar{padding:0 8px}.topbar-title span,.layout-switch{display:none}.session-grid.columns-2,.session-grid.columns-3{display:block}.session-grid .session-pane:not(.active){display:none}.conversation-inner{width:calc(100% - 22px)}.composer-wrap{width:calc(100% - 16px)}.toolbar-left{gap:3px}.composer-control>summary{padding:0 6px}.permission-control>summary>span:nth-child(2),.effort-control>summary>span:nth-child(2){display:none}.control-popover{position:fixed;left:8px;right:8px;bottom:70px;width:auto}.effort-popover,.model-popover{left:8px;right:8px}.usage-modal{border-radius:15px}.usage-modal>footer{display:grid}.modal-backdrop{padding:8px}.provider-accordion-list{padding:10px}.provider-summary-main span{max-width:190px}.provider-summary-side .provider-state{display:none}.analytics-toolbar{flex-wrap:wrap}.data-source{order:3}.export-button{margin-left:0}.metric-grid,.model-metrics,.token-ledger,.claude-model-list{grid-template-columns:1fr}.exact-cost-chart{height:170px}.ledger-values{grid-template-columns:1fr}.panel-title{align-items:flex-start}
 }
+
+/* ---------- DeepSeek 提供商 ---------- */
+.deepseek-mark { width:38px; height:38px; position:relative; display:inline-grid; place-items:center; flex:0 0 auto; border-radius:11px; background:linear-gradient(145deg,#4c7dd0,#2f5aa8); color:#fff; font:700 17px/1 var(--font-control); letter-spacing:.5px; box-shadow:inset 0 1px 0 rgba(255,255,255,.24),0 4px 11px rgba(47,90,168,.2); }
+.deepseek-mark.small { width:30px; height:30px; border-radius:9px; margin-top:1px; font-size:13px; }
+.mapping-note { margin:8px 14px 2px; color:var(--muted); font-size:9.5px; line-height:1.55; }
+.mapping-note b { color:var(--text); font-weight:600; }
+.settings-overview .provider-configure { width:100%; border:1px dashed var(--line-strong); border-radius:11px; padding:10px 12px; display:grid; grid-template-columns:1fr auto; align-items:center; text-align:left; background:var(--surface-soft); margin:4px 0 2px; }
+.provider-configure span { font-size:11.5px; font-weight:600; color:var(--accent); }
+.provider-configure small { font-size:9px; color:var(--muted); grid-column:1; }
+.image-picker.is-disabled { opacity:.45; pointer-events:auto; cursor:not-allowed; }
+.deepseek-modal { width:min(520px,100%); display:flex; flex-direction:column; overflow:hidden; border:1px solid var(--line-strong); border-radius:20px; background:var(--surface-raised); box-shadow:0 30px 90px rgba(0,0,0,.27); }
+.deepseek-modal > header { display:flex; justify-content:space-between; gap:18px; padding:22px 24px 17px; border-bottom:1px solid var(--line); }
+.deepseek-modal h2 { margin:4px 0; font:650 24px/1.2 var(--font-editorial), Georgia, "Songti SC", serif; letter-spacing:-.45px; }
+.deepseek-modal header p { margin:0; color:var(--muted); font-size:10.5px; line-height:1.5; }
+.deepseek-key-row { display:grid; gap:7px; padding:20px 24px 0; font-size:11px; font-weight:600; color:var(--muted); }
+.deepseek-key-input { display:flex; gap:8px; }
+.deepseek-key-input input { flex:1; padding:10px 12px; border:1px solid var(--line-strong); border-radius:10px; background:var(--surface); color:var(--text); font:12.5px/1.4 var(--font-control); }
+.deepseek-key-input input:focus { outline:2px solid var(--accent-action); border-color:transparent; }
+.deepseek-reveal { padding:0 12px; border:1px solid var(--line-strong); border-radius:10px; background:var(--surface-soft); color:var(--muted); font-size:10px; cursor:pointer; }
+.deepseek-remember { display:grid; grid-template-columns:auto 1fr; gap:9px; align-items:start; padding:14px 24px 0; color:var(--muted); font-size:10px; line-height:1.55; cursor:pointer; }
+.deepseek-remember input { margin-top:2px; accent-color:var(--accent); }
+.deepseek-modal-actions { display:flex; gap:10px; padding:18px 24px 4px; }
+.deepseek-modal-actions button { padding:9px 16px; border-radius:10px; font-size:11.5px; font-weight:600; cursor:pointer; }
+.deepseek-modal-actions .primary { border:1px solid var(--accent); background:var(--accent); color:#fff; }
+.deepseek-modal-actions .danger { border:1px solid #c25b4a; background:transparent; color:#c25b4a; }
+.deepseek-modal-actions .secondary { border:1px solid var(--line-strong); background:var(--surface-soft); color:var(--text); }
+.deepseek-setup-status { margin:12px 24px 18px; padding:9px 12px; border-radius:9px; background:var(--surface-soft); border:1px solid var(--line); color:var(--muted); font-size:10.5px; white-space:pre-line; }
+.deepseek-setup-hint { display:flex; justify-content:space-between; align-items:center; gap:14px; padding:10px 24px 16px; }
+.deepseek-setup-hint a { color:var(--accent); font-size:10px; text-decoration:none; }
+.deepseek-setup-hint small { color:var(--faint); font-size:8.5px; }
+.deepseek-connected { padding:20px 24px 18px; display:grid; gap:14px; }
+.deepseek-connected-state { display:flex; flex-direction:column; gap:6px; }
+.deepseek-connected-state p { margin:0; color:var(--muted); font-size:11px; line-height:1.7; }
+.deepseek-connected-state small { color:var(--faint); font-size:9px; }
+.deepseek-connected .deepseek-modal-actions { padding:0; }
+@media (max-width:820px){
+  .deepseek-setup-hint { flex-direction:column; align-items:flex-start; }
+}

@@ -3,13 +3,28 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join, relative as relativePath, resolve, sep } from "node:path";
+import { delimiter, dirname, join, relative as relativePath, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HOST = "127.0.0.1";
 const PORT = 4318;
-const BRIDGE_PROTOCOL = 9;
+const BRIDGE_PROTOCOL = 10;
 const ALLOWED_MODELS = new Set(["sonnet", "opus", "haiku"]);
+// DeepSeek Anthropic 兼容端点；deepseek-v4-pro 为兼容后备值，默认 UI 使用带 [1m] 的模型。
+const DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic";
+const DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
+const DEEPSEEK_MODELS = new Set(["deepseek-v4-pro[1m]", "deepseek-v4-flash", "deepseek-v4-pro"]);
+const DEEPSEEK_UI_MODELS = ["deepseek-v4-pro[1m]", "deepseek-v4-flash"];
+const PROVIDER_KINDS = new Set(["claude", "deepseek"]);
+const DEEPSEEK_EFFORT_MAP = { low: "high", medium: "high", high: "high", xhigh: "max", max: "max" };
+
+function modelAllowed(provider, model) {
+  return provider === "deepseek" ? DEEPSEEK_MODELS.has(model) : ALLOWED_MODELS.has(model);
+}
+
+function defaultModelFor(provider) {
+  return provider === "deepseek" ? "deepseek-v4-pro[1m]" : "sonnet";
+}
 const ALLOWED_PERMISSION_MODES = new Set(["plan", "manual", "acceptEdits", "auto", "dontAsk"]);
 const ALLOWED_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const ALLOWED_IMAGE_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
@@ -17,9 +32,15 @@ const MAX_IMAGES_PER_MESSAGE = 10;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
 const MAX_RUN_REQUEST_CHARS = 33_000_000;
-// 本机专属桥接：任何 localhost 端口的前端页面都可读取（开发 3000 / 生产任意端口），
-// 非本机来源一律不返回 Access-Control-Allow-Origin，浏览器仍会拦截读取。
+// 本机专属桥接：任何 localhost 端口的前端页面都可读取（开发 3000 / 生产任意端口）。
+// 写接口（POST/DELETE 等）除 CORS 外还必须显式拒绝非本机 Origin（在读取 body 之前 403），
+// 避免恶意网页即使拿到响应头也能触发本机状态变更（如写入/删除 DeepSeek 密钥）。
 const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+const STATE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function isLocalOrigin(origin) {
+  return typeof origin === "string" && origin.length <= 512 && LOCAL_ORIGIN.test(origin);
+}
 const running = new Map();
 const runStates = new WeakMap();
 const pendingControlResponses = new Map();
@@ -34,9 +55,11 @@ function findDeepSeekSnapshot() {
   } catch { return null; }
 }
 const logEntries = [];
+// 脱敏覆盖 sk- 后的所有非空白/引号字符（包括 URL 编码、颜色代码等），而不只是字母数字。
+const KEY_PATTERN = /sk-[^\s"'<>|\\]+/g;
 
 function appendLog(message, level = "info") {
-  const entry = { t: Date.now(), level, message: String(message).replace(/sk-[a-zA-Z0-9_-]+/g, "[hidden]").slice(0, 600) };
+  const entry = { t: Date.now(), level, message: String(message).replace(KEY_PATTERN, "[hidden]").slice(0, 600) };
   logEntries.push(entry);
   if (logEntries.length > 400) logEntries.splice(0, logEntries.length - 400);
 }
@@ -284,7 +307,7 @@ async function fetchJson(url, headers) {
 
 function safeError(error) {
   if (error instanceof Error && error.name === "AbortError") return "检测超时，请稍后重试";
-  return (error instanceof Error ? error.message : String(error)).replace(/sk-[a-zA-Z0-9_-]+/g, "[hidden]").slice(0, 180);
+  return (error instanceof Error ? error.message : String(error)).replace(KEY_PATTERN, "[hidden]").slice(0, 180);
 }
 
 function sumAnthropicCost(payload) {
@@ -358,6 +381,161 @@ function parseDeepSeekSnapshot() {
     },
     note: "模型请求数、Tokens 与总消费来自保存的官方平台页面；快照未包含逐日原始值和按模型成本，因此不进行插值。",
   };
+}
+
+/* ---------- DeepSeek 提供商：凭据、密钥验证与子进程环境 ---------- */
+
+const SOURCE_LABELS = { memory: "本次启动", environment: "环境变量", "secure-store": "Windows 安全存储" };
+
+let deepSeekMemoryKey = null; // 进程内密钥（仅本次启动），绝不写入磁盘
+let deepSeekDpapiCache = null; // { value, at }：dpapi 读取短期缓存，避免重复拉起 PowerShell
+const DEEPSEEK_DPAPI_CACHE_TTL = 15_000;
+let fetchImpl = globalThis.fetch; // 可注入，便于接口测试 mock 外部网络
+
+// 测试与特殊部署可把密钥文件重定向到其他目录（普通用户路径：%LOCALAPPDATA%\ClaudeCodeWhite\）。
+function deepSeekDpapiPath() {
+  const override = process.env.CCW_DPAPI_DIR;
+  if (override) return join(override, "deepseek-api-key.dpapi");
+  const base = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
+  return join(base, "ClaudeCodeWhite", "deepseek-api-key.dpapi");
+}
+
+// 老版 Windows PowerShell 不一定在 PATH 里（尤其从 Git Bash 等环境启动时），
+// 优先用 SystemRoot 下的绝对路径；hk 包装所有内部错误为 null，调用方自行判断。
+function powerShellCommand() {
+  if (process.platform !== "win32") return "pwsh";
+  const candidates = [
+    process.env.SystemRoot ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe") : "",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "powershell.exe",
+  ].filter(Boolean);
+  return candidates.find((candidate) => candidate === "powershell.exe" || existsSync(candidate)) || "powershell.exe";
+}
+
+function runPowerShell(script) {
+  const command = Buffer.from(script, "utf16le").toString("base64");
+  return spawnSync(powerShellCommand(), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", command], {
+    encoding: "utf8", windowsHide: true, timeout: 15_000,
+  });
+}
+
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function readDpapiKey() {
+  const path = deepSeekDpapiPath();
+  if (!existsSync(path)) return null;
+  const now = Date.now();
+  if (deepSeekDpapiCache && now - deepSeekDpapiCache.at < DEEPSEEK_DPAPI_CACHE_TTL) return deepSeekDpapiCache.value;
+  const script = [
+    "Add-Type -AssemblyName System.Security",
+    `$bytes = [IO.File]::ReadAllBytes(${psQuote(path)})`,
+    "$data = [Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)",
+    "[Text.Encoding]::UTF8.GetString($data)",
+  ].join("; ");
+  try {
+    const result = runPowerShell(script);
+    if (result.status !== 0 || result.status === null || !result.stdout.trim()) {
+      // 损坏文件 / 权限失败不崩溃桥接器：记录脱敏警告并回退为未配置
+      appendLog("Windows 安全存储读取失败，DeepSeek 凭据回退为未配置", "warn");
+      return null;
+    }
+    const value = result.stdout.trim();
+    deepSeekDpapiCache = { value, at: now };
+    return value;
+  } catch (error) {
+    appendLog(`Windows 安全存储读取失败：${safeError(error)}`, "warn");
+    return null;
+  }
+}
+
+function writeDpapiKey(apiKey) {
+  const path = deepSeekDpapiPath();
+  const script = [
+    "Add-Type -AssemblyName System.Security",
+    `New-Item -ItemType Directory -Force -Path ${psQuote(dirname(path))} | Out-Null`,
+    `$bytes = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes(${psQuote(apiKey)}), $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)`,
+    `[IO.File]::WriteAllBytes(${psQuote(path)}, $bytes)`,
+    "Write-Output 'ok'",
+  ].join("; ");
+  const result = runPowerShell(script);
+  if (result.status !== 0 || result.status === null) {
+    throw new Error("无法使用 Windows 安全存储保存密钥；可取消勾选“安全保存”后改为仅本次启动。");
+  }
+  deepSeekDpapiCache = { value: apiKey, at: Date.now() };
+}
+
+// 只删除 CCW 自己写入的文件，绝不触碰用户的环境变量。
+function deleteDpapiKey() {
+  const path = deepSeekDpapiPath();
+  const result = runPowerShell(`if (Test-Path -LiteralPath ${psQuote(path)}) { Remove-Item -LiteralPath ${psQuote(path)} -Force }`);
+  deepSeekDpapiCache = null;
+  if (result.status !== 0 && result.status !== null) appendLog("Windows 安全存储删除失败，请手动检查密钥文件", "warn");
+}
+
+/** 凭据优先级：进程内存 > DEEPSEEK_API_KEY 环境变量 > Windows DPAPI 文件。 */
+function deepSeekCredential() {
+  if (deepSeekMemoryKey) return { key: deepSeekMemoryKey, source: "memory" };
+  const envKey = typeof process.env.DEEPSEEK_API_KEY === "string" ? process.env.DEEPSEEK_API_KEY.trim() : "";
+  if (envKey) return { key: envKey, source: "environment" };
+  const stored = readDpapiKey();
+  if (stored) return { key: stored, source: "secure-store" };
+  return null;
+}
+
+/** 状态接口只返回 configured/source，绝不返回 Key、前缀或后四位。 */
+function deepSeekConfiguration() {
+  const credential = deepSeekCredential();
+  return credential
+    ? { configured: true, source: credential.source, sourceLabel: SOURCE_LABELS[credential.source] || credential.source, secureStorage: credential.source === "secure-store" }
+    : { configured: false, source: null, sourceLabel: null, secureStorage: false };
+}
+
+async function fetchDeepSeekBalance(apiKey) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const response = await fetchImpl(DEEPSEEK_BALANCE_URL, {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw Object.assign(new Error("DeepSeek API Key 无效或已失效。"), { code: "deepseek-invalid-key" });
+    }
+    const text = await response.text();
+    let payload = null;
+    try { payload = JSON.parse(text); } catch { /* 非 JSON 响应按失败处理 */ }
+    if (!response.ok) throw Object.assign(new Error("无法连接 DeepSeek，请检查网络后重试。"), { code: "deepseek-network" });
+    return payload || {};
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw Object.assign(new Error("连接 DeepSeek 检测超时，请稍后重试。"), { code: "deepseek-network" });
+    }
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+
+/**
+ * 构造 DeepSeek 子进程环境：从 { ...baseEnv } 副本出发，只修改子进程环境；
+ * 不调用 setx、不写注册表、不永久修改当前 shell，也不改变原 process.env。
+ */
+function deepSeekChildEnvironment(baseEnv, model, effort, apiKey) {
+  const env = { ...baseEnv };
+  delete env.CLAUDE_CODE_USE_BEDROCK;
+  delete env.CLAUDE_CODE_USE_VERTEX;
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_BASE_URL;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  env.ANTHROPIC_BASE_URL = DEEPSEEK_BASE_URL;
+  env.ANTHROPIC_AUTH_TOKEN = apiKey;
+  env.ANTHROPIC_MODEL = model;
+  env.ANTHROPIC_DEFAULT_OPUS_MODEL = "deepseek-v4-pro[1m]";
+  env.ANTHROPIC_DEFAULT_SONNET_MODEL = "deepseek-v4-pro[1m]";
+  env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "deepseek-v4-flash";
+  env.CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash";
+  env.CLAUDE_CODE_EFFORT_LEVEL = DEEPSEEK_EFFORT_MAP[effort] || "high";
+  return env;
 }
 
 /* ---------- 工作区：Git 变更、文件树、文件预览 ---------- */
@@ -722,19 +900,25 @@ async function usageProviders() {
     href: "https://claude.ai/settings/usage",
   }];
 
-  if (process.env.DEEPSEEK_API_KEY) {
+  const deepSeekCreds = deepSeekCredential();
+  if (deepSeekCreds) {
     try {
-      const payload = await fetchJson("https://api.deepseek.com/user/balance", { Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`, Accept: "application/json" });
+      const payload = await fetchDeepSeekBalance(deepSeekCreds.key);
       providers.push({
         id: "deepseek", name: "DeepSeek", configured: true, state: payload.is_available ? "ready" : "limited",
-        summary: payload.is_available ? "官方余额接口已连接" : "账户当前没有可用余额",
+        summary: `${SOURCE_LABELS[deepSeekCreds.source]} · ${payload.is_available ? "官方余额接口已连接" : "账户当前没有可用余额"}`,
+        detail: `凭据来源：${SOURCE_LABELS[deepSeekCreds.source]}`,
         balances: (payload.balance_infos || []).map((item) => ({ currency: item.currency, total: item.total_balance, granted: item.granted_balance, toppedUp: item.topped_up_balance })),
         href: "https://platform.deepseek.com/usage",
       });
     } catch (error) {
-      providers.push({ id: "deepseek", name: "DeepSeek", configured: true, state: "error", summary: "余额检测失败", detail: safeError(error), href: "https://platform.deepseek.com/usage" });
+      providers.push({
+        id: "deepseek", name: "DeepSeek", configured: true,
+        state: "error", summary: error?.code === "deepseek-invalid-key" ? "DeepSeek API Key 无效或已失效" : "余额检测失败",
+        detail: safeError(error), href: "https://platform.deepseek.com/usage",
+      });
     }
-  } else providers.push({ id: "deepseek", name: "DeepSeek", configured: false, state: "missing", summary: "设置 DEEPSEEK_API_KEY 后可读取充值与赠金余额", href: "https://platform.deepseek.com/usage" });
+  } else providers.push({ id: "deepseek", name: "DeepSeek", configured: false, state: "missing", summary: "未配置 DeepSeek API Key；可在会话设置中连接，或设置 DEEPSEEK_API_KEY 环境变量", href: "https://platform.deepseek.com/usage" });
 
   if (process.env.ANTHROPIC_ADMIN_KEY) {
     try {
@@ -773,17 +957,97 @@ async function usageProviders() {
 async function handleRequest(request, response) {
   const origin = request.headers.origin || "";
   if (request.method === "OPTIONS") { response.writeHead(204, corsHeaders(origin)); response.end(); return; }
+  // 有状态接口必须防御恶意网页跨站请求：非本机 Origin 在读取 body 前直接 403（不依赖 CORS 响应头拦截）。
+  if (STATE_METHODS.has(request.method) && origin && !isLocalOrigin(origin)) {
+    response.writeHead(403, { "Content-Type": "application/json; charset=utf-8", ...corsHeaders("") });
+    response.end(JSON.stringify({ error: "仅允许本机页面访问本机桥接器" }));
+    return;
+  }
   const url = new URL(request.url || "/", `http://${HOST}:${PORT}`);
 
   if (request.method === "GET" && url.pathname === "/api/status") {
     const claudePath = findClaude();
-    sendJson(response, 200, { bridge: true, bridgeProtocol: BRIDGE_PROTOCOL, capabilities: ["approval-strategies", "effort-levels", "multi-image-input", "native-folder-picker", "live-steering"], claudeInstalled: Boolean(claudePath), claudePath, claudeVersion: claudeVersion(claudePath), pathEntries: (process.env.PATH || "").split(delimiter).length, cwd: process.cwd() }, origin);
+    const deepSeek = deepSeekConfiguration();
+    sendJson(response, 200, { bridge: true, bridgeProtocol: BRIDGE_PROTOCOL, capabilities: ["approval-strategies", "effort-levels", "multi-image-input", "native-folder-picker", "live-steering", "deepseek-provider", "secure-provider-store"], claudeInstalled: Boolean(claudePath), claudePath, claudeVersion: claudeVersion(claudePath), pathEntries: (process.env.PATH || "").split(delimiter).length, cwd: process.cwd(), deepseekConfigured: deepSeek.configured, deepseekCredentialSource: deepSeek.source }, origin);
     return;
   }
 
   if (request.method === "GET" && url.pathname === "/api/usage") {
     try { sendJson(response, 200, { providers: await usageProviders(), checkedAt: new Date().toISOString() }, origin); }
     catch (error) { sendJson(response, 500, { error: safeError(error) }, origin); }
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/providers/deepseek") {
+    try {
+      const config = deepSeekConfiguration();
+      sendJson(response, 200, {
+        configured: config.configured,
+        source: config.source,
+        sourceLabel: config.sourceLabel,
+        secureStorage: config.secureStorage,
+        baseUrl: DEEPSEEK_BASE_URL,
+        models: DEEPSEEK_UI_MODELS,
+        // 已连接时附带余额可用性（只读状态，非敏感余额数值由 /api/usage 提供）
+        balanceAvailable: config.configured ? await fetchDeepSeekBalance(deepSeekCredential().key).then((payload) => payload.is_available !== false).catch(() => null) : null,
+      }, origin);
+    } catch (error) {
+      sendJson(response, 500, { error: safeError(error) }, origin);
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/providers/deepseek") {
+    try {
+      const body = await readJson(request, 10 * 1024);
+      const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+      if (!apiKey) throw new Error("请粘贴 DeepSeek API Key。");
+      if (!/^sk-[A-Za-z0-9]/i.test(apiKey)) throw new Error("API Key 应以 sk- 开头。");
+      if (/\s/.test(apiKey) || apiKey.length < 30 || apiKey.length > 200) throw new Error("API Key 格式不正确（含空白或长度异常）。");
+      const payload = await fetchDeepSeekBalance(apiKey);
+      // 验证成功后才写入；验证失败绝不覆盖此前可用的已保存 Key。
+      let source = "memory";
+      if (body.remember) {
+        writeDpapiKey(apiKey);
+        source = "secure-store";
+      }
+      deepSeekMemoryKey = apiKey;
+      deepSeekDpapiCache = null;
+      const isAvailable = payload.is_available !== false;
+      appendLog(`DeepSeek API 已配置（${SOURCE_LABELS[source]}）`);
+      sendJson(response, 200, {
+        connected: true,
+        configured: true,
+        source,
+        sourceLabel: SOURCE_LABELS[source],
+        secureStorage: source === "secure-store",
+        balanceAvailable: isAvailable,
+        isAvailable,
+        currency: payload.currency || null,
+        balance: isAvailable ? null : "账户当前没有可用余额",
+      }, origin);
+    } catch (error) {
+      const code = error?.code || "";
+      const message = code === "deepseek-invalid-key" ? "DeepSeek API Key 无效或已失效。"
+        : code === "deepseek-network" ? "无法连接 DeepSeek，请检查网络后重试。"
+        : error?.message || "连接失败";
+      appendLog(`DeepSeek 配置失败：${safeError(message)}`, "warn");
+      sendJson(response, 400, { error: message.replace(KEY_PATTERN, "[hidden]"), code: code || "invalid" }, origin);
+    }
+    return;
+  }
+
+  if (request.method === "DELETE" && url.pathname === "/api/providers/deepseek") {
+    deepSeekMemoryKey = null;
+    deleteDpapiKey();
+    const envKey = typeof process.env.DEEPSEEK_API_KEY === "string" ? process.env.DEEPSEEK_API_KEY.trim() : "";
+    if (envKey) {
+      // 环境变量不是 CCW 创建的，不删除；但向用户解释为什么仍处于连接状态。
+      sendJson(response, 200, { configured: true, source: "environment", message: "环境中仍存在 DEEPSEEK_API_KEY，DeepSeek 依然处于连接状态。" }, origin);
+    } else {
+      appendLog("DeepSeek 配置已移除");
+      sendJson(response, 200, { configured: false, source: null, message: "已断开 DeepSeek。" }, origin);
+    }
     return;
   }
 
@@ -984,7 +1248,14 @@ async function handleRequest(request, response) {
     const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
     const images = parseRunImages(body.images);
     const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
-    const model = ALLOWED_MODELS.has(body.model) ? body.model : "sonnet";
+    const provider = PROVIDER_KINDS.has(body.provider) ? body.provider : "claude";
+    let model = defaultModelFor(provider);
+    if (typeof body.model === "string" && body.model) {
+      if (!modelAllowed(provider, body.model)) {
+        throw new Error(provider === "deepseek" ? "DeepSeek 只支持 V4 Pro 与 V4 Flash 模型。" : "Claude 只支持 Sonnet、Opus 与 Haiku 模型。");
+      }
+      model = body.model;
+    }
     const permissionMode = ALLOWED_PERMISSION_MODES.has(body.permissionMode) ? body.permissionMode : "plan";
     const effort = ALLOWED_EFFORT_LEVELS.has(body.effort) ? body.effort : "medium";
     const sessionId = typeof body.sessionId === "string" && /^[a-zA-Z0-9_-]{6,160}$/.test(body.sessionId) ? body.sessionId : null;
@@ -994,14 +1265,23 @@ async function handleRequest(request, response) {
 
     const claudePath = findClaude();
     if (!claudePath) throw new Error("没有检测到 Claude Code。请先安装并完成 claude 登录。");
-    const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", model, "--permission-mode", permissionMode, "--effort", effort];
+    // 子进程环境按 provider 独立构造；DeepSeek 未配置时在 spawn 之前返回明确错误。
+    let childEnv = process.env;
+    if (provider === "deepseek") {
+      const credential = deepSeekCredential();
+      if (!credential) throw new Error("尚未配置 DeepSeek API Key，请先完成连接。");
+      childEnv = deepSeekChildEnvironment(process.env, model, effort, credential.key);
+    }
+    // DeepSeek 五档交互映射为 high/max 两档（见 PRD 4.4），CLAUDE_CODE_EFFORT_LEVEL 与 --effort 保持一致。
+    const claudeEffort = provider === "deepseek" ? DEEPSEEK_EFFORT_MAP[effort] || "high" : effort;
+    const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", model, "--permission-mode", permissionMode, "--effort", claudeEffort];
     if (sessionId) args.push("--resume", sessionId);
     const isCmd = process.platform === "win32" && claudePath.toLowerCase().endsWith(".cmd");
-    const child = spawn(claudePath, args, { cwd, env: process.env, shell: isCmd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(claudePath, args, { cwd, env: childEnv, shell: isCmd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     const runState = { initialized: false, messagesSent: 0, resultsSeen: 0, pendingRedirects: 0 };
     runStates.set(child, runState);
     if (requestId) running.set(requestId, child);
-    appendLog(`Claude Code 会话启动：${args.join(" ")}（cwd: ${cwd}）`);
+    appendLog(`Claude Code 会话启动：provider=${provider} ${args.join(" ")}（cwd: ${cwd}）`);
 
     response.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Content-Type-Options": "nosniff", ...corsHeaders(origin) });
     child.stdout.pipe(response, { end: false });
@@ -1075,4 +1355,33 @@ if (isStandalone) {
     appendLog(`桥接器已启动：http://${HOST}:${PORT}`);
     console.log(`Claude Code White bridge: http://${HOST}:${PORT}`);
   });
+}
+
+/* ---------- 导出：接口测试与前端共享的纯函数 ---------- */
+
+export {
+  BRIDGE_PROTOCOL,
+  DEEPSEEK_BASE_URL,
+  DEEPSEEK_MODELS,
+  DEEPSEEK_UI_MODELS,
+  DEEPSEEK_EFFORT_MAP,
+  modelAllowed,
+  defaultModelFor,
+  isLocalOrigin,
+  deepSeekConfiguration,
+  deepSeekCredential,
+  deepSeekChildEnvironment,
+  readDpapiKey,
+  writeDpapiKey,
+  deleteDpapiKey,
+  fetchDeepSeekBalance,
+};
+
+export function __setDeepSeekMemoryKeyForTests(value) {
+  deepSeekMemoryKey = value || null;
+  deepSeekDpapiCache = null;
+}
+
+export function __setFetchImplForTests(impl) {
+  fetchImpl = impl;
 }

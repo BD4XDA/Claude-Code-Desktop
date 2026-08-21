@@ -19,9 +19,9 @@ Typography is tuned for high-resolution desktop displays: a humanist serif for t
 - 可搜索并恢复本机 Claude Code 历史任务，继续原始 session 上下文、项目目录和模型
 - `Ctrl+Shift+P` 快捷操作面板：新建/恢复任务、打开变更/文件/日志/记忆、切换检查面板与主题
 - 浅色 / 深色主题与设备本地会话恢复
-- Sonnet / Opus / Haiku 模型切换
+- Sonnet / Opus / Haiku 模型切换；**DeepSeek V4 Pro / V4 Flash 原生提供商**——在会话设置中粘贴一次 API Key（可选 Windows 当前账户安全保存或仅本次启动），由本机桥接通过 DeepSeek Anthropic 兼容端点驱动真实 Claude Code，无需手动设置 `ANTHROPIC_BASE_URL` 等环境变量
 - Codex 式批准策略：仅规划 / 操作前批准 / 自动批准编辑 / 智能批准 / 不询问（受限），每个会话独立保存
-- 思考强度可随时切换：快速 / 标准 / 深入 / 极强 / 最大，真实传入 Claude Code `--effort`，运行中调整从下一轮推理生效
+- 思考强度可随时切换：快速 / 标准 / 深入 / 极强 / 最大，真实传入 Claude Code `--effort`，运行中调整从下一轮推理生效；DeepSeek 模式下五档映射为 high / max 两档并明确提示
 - Codex 式流程展示：运行时显示当前步骤；结果输出后自动折叠为轻量摘要，可按回答点击「查看流程详情」展开步骤、工具输入与结果
 - 右侧检查面板：真实 Git 变更、可点击的单文件 Diff（新增/删除行着色）、可展开的文件树与文件预览、桥接器实时日志、本机记忆
 - 记忆面板按工作区分区、按类型（用户 / 反馈 / 项目 / 参考）分类，可新建、编辑、删除记忆，直接写入 `~/.claude/projects/<工作区>/memory/` 并维护索引
@@ -36,9 +36,9 @@ Typography is tuned for high-resolution desktop displays: a humanist serif for t
 - Search and resume local Claude Code history — original session context, directory and model
 - `Ctrl+Shift+P` command palette: new/resume tasks, open changes/files/logs/memory, toggle inspector & theme
 - Light/dark theme with per-device session restore
-- Sonnet / Opus / Haiku model switching
+- Sonnet / Opus / Haiku model switching, plus a **native DeepSeek provider (V4 Pro / V4 Flash)**: paste an API key once in session settings (optionally secured via Windows DPAPI for your account, or session-only), and the local bridge drives the real Claude Code through DeepSeek's Anthropic-compatible endpoint — no need to hand-set `ANTHROPIC_BASE_URL`
+- Thinking levels: quick / normal / deep / extreme / max — passed as real `--effort`; changes apply from the next reasoning turn; under DeepSeek the five levels map to high/max and the UI says so
 - Codex-style approval policies: plan-only / ask / auto-edit edits / smart / never (limited), saved per session
-- Thinking level switchable any time: quick / normal / deep / extreme / max — passed as real `--effort`; changes apply from the next reasoning turn
 - Codex-style flow view: shows the current step live; results collapse into lightweight summaries, expandable per answer (steps, tool inputs, outputs)
 - Inspector panel: real Git changes, clickable per-file diffs (added/removed lines colored), expandable file tree with preview, live bridge logs, local memory
 - Memory panel grouped by workspace and type (user / feedback / project / reference); create, edit, delete directly under `~/.claude/projects/<workspace>/memory/` with auto-maintained index
@@ -101,7 +101,7 @@ npm run start    # frontend + auto-start local bridge; page falls back to the st
 
 ## 用量供应商（可选）Usage providers (optional)
 
-在启动 PowerShell 的用户环境中设置下列变量即可启用对应检测器；密钥只由监听 `127.0.0.1` 的本地桥读取，不会返回给网页：
+在启动 PowerShell 的用户环境中设置下列变量即可启用对应检测器；密钥只由监听 `127.0.0.1` 的本地桥读取，不会返回给网页。`DEEPSEEK_API_KEY` 同时可作为 DeepSeek 推理提供商的密钥来源（优先级低于本次会话在 UI 中粘贴的 Key、高于 Windows 安全存储）：
 Set these variables in the environment of the launching PowerShell to enable the corresponding detectors; keys are read only by the local bridge on `127.0.0.1` and never returned to the page:
 
 ```powershell
@@ -114,6 +114,26 @@ $env:GEMINI_API_KEY = '...'
 
 Anthropic 的 Usage & Cost API 只适用于组织 Admin API key，不能查询个人 Claude Pro / Max 订阅剩余额度。Gemini 普通 API key 也没有余额查询接口，因此界面会跳转到官方 AI Studio 用量页。
 Anthropic's Usage & Cost API only works with organization Admin API keys — it cannot query personal Claude Pro/Max plan quotas. Gemini API keys have no balance endpoint either, so the UI links to the official AI Studio usage page instead.
+
+---
+
+## DeepSeek 提供商（可选）DeepSeek provider (optional)
+
+默认的 Claude Code 用户**不需要任何 DeepSeek 配置**——登录状态、Anthropic、Bedrock、Vertex 和自定义网关全部原样保留。只有希望用 DeepSeek API 计费驱动 Claude Code 时才需要：
+
+1. 在一个会话窗格底部点开「✦/D 设置」→「高级」→「提供商」→「DeepSeek」→「连接 DeepSeek API」。
+2. 粘贴一次 API Key；勾选“使用 Windows 当前账户安全保存”（默认开启）则经 DPAPI 加密存入 `%LOCALAPPDATA%\ClaudeCodeWhite\deepseek-api-key.dpapi`（仅当前用户可解密，Windows 若不可用会提示改回仅本次启动），取消勾选则只存在桥接器内存、关闭即失效。
+3. 验证成功后该会话自动切换到 DeepSeek V4 Pro；也可以在设置里改回 Claude。
+
+要点：Key 连接时只发给 `127.0.0.1` 本机桥接器并直接调用 DeepSeek 官方余额接口验证（失败不会覆盖旧密钥）；Key 永不写入浏览器存储、会话记录、日志或发布包，状态接口只返回配置来源（本次启动 / 环境变量 / Windows 安全存储）。DeepSeek 仍通过本机 `claude` CLI 驱动（发起请求的还是 Claude Code），因此权限、工具、停止、排队、调整方向、历史与恢复行为完全一致；未做端到端验证前，DeepSeek 会话会禁用图片输入并明确提示。
+
+模型与思考强度：UI 只提供 DeepSeek V4 Pro（`deepseek-v4-pro[1m]`）与 V4 Flash（`deepseek-v4-flash`）。五档思考强度在 DeepSeek 侧映射为两档——快速 / 标准 / 深入 → `high`，极强 / 最大 → `max`，界面会明文说明。
+
+断开与恢复：在提供商页或“用量与额度”中心移除配置即可（同时删除 DPAPI 文件）；若系统中还设置了 `DEEPSEEK_API_KEY` 环境变量，桥接器会继续报告 environment 来源并解释原因。环境变量不会被删除，也不会被修改。
+
+For default Claude Code users nothing changes — Claude login, Anthropic, Bedrock, Vertex and custom gateways are untouched. If you want DeepSeek API billing instead: open the settings under the composer → 「高级」 → 「提供商」 → DeepSeek, paste the API key once. With “secure save” ticked it is encrypted via Windows DPAPI under `%LOCALAPPDATA%\ClaudeCodeWhite\deepseek-api-key.dpapi` (your Windows account only); unticked keeps it in bridge memory for this session only. Verified keys switch that pane to DeepSeek V4 Pro; switching back to Claude is one click. The key is sent to the local bridge on `127.0.0.1` only, never stored in browser storage, session files, logs or the release zip, and state endpoints only report its source. DeepSeek is still driven through the local `claude` CLI, so permissions, tools, stop, queueing, steering and history behave identically; until real end-to-end verification, DeepSeek panes disable image input with a clear message. Effort levels map to high/max as shown in the UI. To disconnect, remove the config in the provider page — your `DEEPSEEK_API_KEY` environment variable (if any) is left untouched.
+
+The same key can also be provided as before via `DEEPSEEK_API_KEY` (see below) — precedence: this-session key, then environment, then Windows store.
 
 ---
 

@@ -10,7 +10,7 @@
     "build": "node scripts/run-vinext.mjs build",
     "start": "node scripts/run-vinext.mjs start",
     "bridge": "node bridge/server.mjs",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/bridge-provider.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "release": "node scripts/make-release.mjs"
   },

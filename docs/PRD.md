@@ -51,6 +51,7 @@
 - 快捷操作面板（Ctrl+Shift+P）：新建/恢复任务、打开变更/文件/日志/记忆、切换检查面板与主题；支持搜索和 Enter 执行
 - 历史任务恢复：读取本机 `~/.claude/projects/*/*.jsonl` 的最近任务，支持搜索、预览并恢复原始 session ID、项目目录、模型与最近 60 条对话；大记录按头尾窗口读取
 - 模型切换：Sonnet / Opus / **Haiku**（server `ALLOWED_MODELS` 与前端 select 同步）
+- **DeepSeek 原生提供商**（V4 Pro `deepseek-v4-pro[1m]` / V4 Flash `deepseek-v4-flash`）：会话 `provider` 字段独立选择；DeepSeek 子进程经 `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic` + `ANTHROPIC_AUTH_TOKEN` 驱动同一 Claude Code CLI；密钥来源优先级：会话内存 > `DEEPSEEK_API_KEY` 环境变量 > Windows DPAPI（`%LOCALAPPDATA%\ClaudeCodeWhite\deepseek-api-key.dpapi`）；写接口显式拒绝非本机 Origin（403）；五档思考强度映射为 high/max（UI 明文说明）；未端到端验证前禁用图片输入并明确提示
 - Codex 式批准策略：仅规划（plan）/ 操作前批准（manual）/ 自动批准编辑（acceptEdits）/ 智能批准（auto）/ 不询问受限（dontAsk）；逐窗格持久化并真实传入 `--permission-mode`
 - 思考强度：快速 / 标准 / 深入 / 极强 / 最大（low / medium / high / xhigh / max）；逐窗格持久化并真实传入 `--effort`，运行中更改从下一轮推理生效
 - 会话持久化 localStorage（`claude-code-sessions`）+ 主题（`claude-code-theme`）；恢复时清 `sending`
@@ -90,7 +91,7 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/status` | bridge/claude 检测（PATH/npm 全局/原生/WinGet 四路）、`cwd`（会话默认项目路径来源） |
-| POST | `/api/run` | body `{prompt, cwd, model, permissionMode, sessionId?, requestId}` → 200 NDJSON 流（claude stdout 直通）；模型/权限白名单校验；cwd 必须存在 |
+| POST | `/api/run` | body `{prompt, cwd, provider?, model, permissionMode, sessionId?, requestId}` → 200 NDJSON 流（claude stdout 直通）；provider 模型白名单独立校验（DeepSeek 拒绝 Sonnet，Claude 拒绝 V4 Pro）；DeepSeek 未配置时 spawn 前报错（"尚未配置 DeepSeek API Key…"）；DeepSeek 子进程独立 env（`{ ...process.env }` 副本 + 删除 BEDROCK/VERTEX/ANTHROPIC_* 冲突键） |
 | POST | `/api/cancel` | 按 requestId 杀子进程 |
 | GET | `/api/logs` | 桥接内存日志（密钥脱敏 `sk-...`） |
 | GET | `/api/memory` | 全部工作区记忆（含 MEMORY.md 索引行，≤30） |
@@ -105,8 +106,11 @@
 | GET | `/api/workspace/file?path&file` | 文件预览（路径越界防护 `insideDirectory`，≤128KB） |
 | GET | `/api/sessions` / `/api/sessions/detail` | 本机 Claude Code 历史摘要与会话详情；限定项目/UUID 文件名并排除 subagents |
 | GET | `/api/usage` / `/api/usage/deepseek` | 供应商余额/成本/平台快照 |
+| GET | `/api/providers/deepseek` | 非敏感配置状态：configured / source（memory·environment·secure-store）/ secureStorage / baseUrl / models；绝不返回 Key、前缀或后四位 |
+| POST | `/api/providers/deepseek` | `{apiKey, remember}` — Origin 校验 → body ≤10KB · sk- 前缀 · 无空白 → 官方 `/user/balance` 验证 → 成功后写内存/DPAPI；失败不覆盖旧密钥；日志/响应脱敏（`sk-` 后所有非空白/引号字符） |
+| DELETE | `/api/providers/deepseek` | 清进程内密钥 + 删 CCW 的 DPAPI 文件；`DEEPSEEK_API_KEY` 环境变量不删除，存在时继续报告 environment 来源 |
 
-**安全要点**：所有工作区路径参数做 `resolve` + `insideDirectory` 校验；workspaceId 白名单字符 `[A-Za-z0-9_-]`；记忆文件白名单 `*.md`；日志与错误信息 `sk-` 密钥正则脱敏；`--dangerously-skip-permissions` 禁止出现（有测试把关）。
+**安全要点**：所有工作区路径参数做 `resolve` + `insideDirectory` 校验；workspaceId 白名单字符 `[A-Za-z0-9_-]`；记忆文件白名单 `*.md`；日志与错误信息 `sk-` 密钥正则脱敏（覆盖非空白/引号字符）；`--dangerously-skip-permissions` 禁止出现（有测试把关）；**有状态接口（POST/DELETE/PUT/PATCH）在读取 body 之前校验 Origin 必须为本机 localhost 源，非本机 Origin 直接 403**（不只靠 CORS 头拦截）；DeepSeek 密钥只存本机（内存 / DPAPI），状态接口只返回配置来源。桥接协议 **10**（`deepseek-provider` + `secure-provider-store` capability）；启动器与前端要求 protocol ≥ 10。
 
 ---
 
@@ -153,10 +157,11 @@ npm run start        # 生产：自动拉起桥接 + 页面（PORT=xxxx 可指�
 - `npm run start` 时页面自动打开浏览器（当前 dev 模式才自动开）
 - 记忆面板支持正文 markdown 渲染（当前 `<pre>` 纯文本）
 - 旧 dev server 实例（vite 插件内桥接不热更新）——**改动 bridge/server.mjs 后必须重启 dev server**，用户机器上曾长期残留旧实例导致"修复不生效"
+- **DeepSeek 图片输入端到端验证**：当前 `DEEPSEEK_IMAGES_SUPPORTED = false`，验证通过（单张/多张/图+文/运行中插入）后改为 true 并放开前端三处禁用；未验证前禁用并提示"当前 DeepSeek 模型暂不支持图片输入"
 
 ## 8. 提交状态（重要）
 
-- 最近提交：`ef57760 feat: build Claude Code desktop workspace`（2026-08-11 之前）
+- 最近提交：`9fd0e90 fix: show steered messages in conversation`（1.0 主线已整理；DeepSeek 提供商以 `feat: add native DeepSeek provider for Claude Code` 提交）
 - 工作树：**大量未提交改动**（30+ 文件：bridge 重构、检查面板、记忆读写、一键桥接、工具可视化、按回答自动折叠流程、实时 tokens、自动滚动、管理员快捷方式、本地化清理删除 Cloudflare/D1/worker/drizzle/DeepSeek 快照等）
 - 用户 2026-08-11 晚暂定"明天再说"，**接手时先与用户确认是否提交**；建议一次性 commit（改动相互依赖）
 - 发布包：由 `npm run release`（scripts/make-release.mjs）生成，已排除全部本机隐私与构建产物

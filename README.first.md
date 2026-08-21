@@ -204,6 +204,14 @@ The first build takes a minute or two; afterwards `npm run start` is all you nee
 3. 输入你的需求，回车 → 左边窗口开始实时显示 AI 干活过程 — Type your request, press Enter → the pane starts streaming the AI's work live
 4. 想再开一个，点「新建任务」再来一个，窗口可以拖来拖去 — Want another one? Click "New Task" again; panes can be dragged around
 
+**想用 DeepSeek API 计费？（可选）Wanna pay with DeepSeek API? (optional)**
+1. 打开任意会话 → 底部设置（✦/D）→「高级」→「提供商」→ DeepSeek →「连接 DeepSeek API」— Open any pane's settings (✦/D) → 高级 → 提供商 → DeepSeek → "连接 DeepSeek API"
+2. 粘贴 DeepSeek API Key（在 platform.deepseek.com 创建）。勾选“使用 Windows 当前账户安全保存”则加密存在本机账户下（关电脑也有效）；不勾选则只记到关闭软件为止 — Paste a DeepSeek API key (create one at platform.deepseek.com). Tick "secure-save" to keep it encrypted under your Windows account (survives restarts); untick keeps it only until the app closes
+3. 验证成功后该会话自动用 DeepSeek V4 Pro，随时可在“提供商”页换回 Claude — Verified panes switch to DeepSeek V4 Pro; switch back to Claude from the same provider page
+
+密钥只发到 127.0.0.1 本机桥，不会上传、不会写进聊天记录或日志。普通 Claude Code 用户不用管这一节，登录状态完全不受影响。
+The key only goes to the 127.0.0.1 local bridge — never uploaded, never written into chats or logs. Regular Claude Code users can skip this section entirely.
+
 ---
 
 ## 七、常见问题（小白版） FAQ (beginner edition)
