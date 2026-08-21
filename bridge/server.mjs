@@ -1,20 +1,28 @@
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, join, relative as relativePath, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HOST = "127.0.0.1";
 const PORT = 4318;
-const BRIDGE_PROTOCOL = 2;
+const BRIDGE_PROTOCOL = 9;
 const ALLOWED_MODELS = new Set(["sonnet", "opus", "haiku"]);
 const ALLOWED_PERMISSION_MODES = new Set(["plan", "manual", "acceptEdits", "auto", "dontAsk"]);
 const ALLOWED_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const ALLOWED_IMAGE_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const MAX_IMAGES_PER_MESSAGE = 10;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
+const MAX_RUN_REQUEST_CHARS = 33_000_000;
 // 本机专属桥接：任何 localhost 端口的前端页面都可读取（开发 3000 / 生产任意端口），
 // 非本机来源一律不返回 Access-Control-Allow-Origin，浏览器仍会拦截读取。
 const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
 const running = new Map();
+const runStates = new WeakMap();
+const pendingControlResponses = new Map();
 const DEEPSEEK_SNAPSHOT_GLOB = /^DeepSeek.*\.html$/i;
 
 function findDeepSeekSnapshot() {
@@ -33,9 +41,73 @@ function appendLog(message, level = "info") {
   if (logEntries.length > 400) logEntries.splice(0, logEntries.length - 400);
 }
 
+function terminateProcessTree(child) {
+  if (!child) return false;
+  if (process.platform === "win32" && Number.isInteger(child.pid)) {
+    const result = spawnSync("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" });
+    if (result.status === 0) return true;
+  }
+  if (child.killed) return true;
+  try { return child.kill("SIGTERM"); } catch { return false; }
+}
+
+function maybeEndRunInput(child) {
+  const state = runStates.get(child);
+  if (!state || state.pendingRedirects > 0 || state.messagesSent === 0 || state.resultsSeen < state.messagesSent) return;
+  if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+}
+
+function settleControlResponse(child, event) {
+  const response = event?.response;
+  const requestId = typeof response?.request_id === "string" ? response.request_id : null;
+  const pending = requestId ? pendingControlResponses.get(requestId) : null;
+  if (!pending || pending.child !== child) return;
+  clearTimeout(pending.timer);
+  pendingControlResponses.delete(requestId);
+  if (response.subtype === "error") pending.reject(new Error(response.error || "Claude Code 拒绝了控制请求"));
+  else pending.resolve(response.response || {});
+}
+
+function rejectPendingControls(child, error) {
+  for (const [requestId, pending] of pendingControlResponses) {
+    if (pending.child !== child) continue;
+    clearTimeout(pending.timer);
+    pendingControlResponses.delete(requestId);
+    pending.reject(error);
+  }
+}
+
+function sendClaudeControlRequest(child, request, timeoutMs = 10_000) {
+  if (!child || child.killed || child.stdin.destroyed || child.stdin.writableEnded) return Promise.reject(new Error("Claude Code 输入通道已经关闭"));
+  const requestId = `req_${randomUUID()}`;
+  return new Promise((resolvePromise, reject) => {
+    const timer = setTimeout(() => {
+      pendingControlResponses.delete(requestId);
+      reject(new Error(`${request.subtype || "control"} 请求等待 Claude Code 确认超时`));
+    }, timeoutMs);
+    pendingControlResponses.set(requestId, { child, timer, resolve: resolvePromise, reject });
+    try {
+      child.stdin.write(`${JSON.stringify({ type: "control_request", request_id: requestId, request })}\n`);
+    } catch (error) {
+      clearTimeout(timer);
+      pendingControlResponses.delete(requestId);
+      reject(error);
+    }
+  });
+}
+
+function writeRunUserMessage(child, message) {
+  const state = runStates.get(child);
+  if (!state || child.killed || child.stdin.destroyed || child.stdin.writableEnded) throw new Error("Claude Code 已结束，无法插入新消息");
+  state.messagesSent += 1;
+  try { child.stdin.write(`${JSON.stringify(message)}\n`); }
+  catch (error) { state.messagesSent -= 1; throw error; }
+}
+
 /* ---------- 一键桥接：由同源宿主（dev server 插件）拉起独立桥接进程 ---------- */
 
 let spawnedBridgePid = null;
+let activeDirectoryPicker = null;
 
 function probeStandaloneBridge(timeoutMs = 1200) {
   return new Promise((resolvePromise) => {
@@ -107,13 +179,13 @@ function sendJson(response, status, payload, origin = "") {
   response.end(JSON.stringify(payload));
 }
 
-function readJson(request) {
+function readJson(request, maxChars = 1_100_000) {
   return new Promise((resolve, reject) => {
     let body = "";
     request.setEncoding("utf8");
     request.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 1_100_000) reject(new Error("请求内容过大"));
+      if (body.length > maxChars) reject(new Error("请求内容过大"));
     });
     request.on("end", () => {
       try { resolve(JSON.parse(body || "{}")); } catch { reject(new Error("请求不是有效 JSON")); }
@@ -122,9 +194,79 @@ function readJson(request) {
   });
 }
 
+function parseRunImages(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("图片数据格式不正确");
+  if (value.length > MAX_IMAGES_PER_MESSAGE) throw new Error(`每次最多上传 ${MAX_IMAGES_PER_MESSAGE} 张图片`);
+  let totalBytes = 0;
+  return value.map((image, index) => {
+    const mediaType = typeof image?.mediaType === "string" ? image.mediaType : "";
+    const data = typeof image?.data === "string" ? image.data : "";
+    if (!ALLOWED_IMAGE_MEDIA_TYPES.has(mediaType)) throw new Error(`第 ${index + 1} 张图片格式不受支持`);
+    if (!data || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new Error(`第 ${index + 1} 张图片数据无效`);
+    const decoded = Buffer.from(data, "base64");
+    const normalizedInput = data.replace(/=+$/, "");
+    const normalizedDecoded = decoded.toString("base64").replace(/=+$/, "");
+    if (!decoded.length || normalizedDecoded !== normalizedInput) throw new Error(`第 ${index + 1} 张图片数据无效`);
+    if (decoded.length > MAX_IMAGE_BYTES) throw new Error(`第 ${index + 1} 张图片超过 5 MB`);
+    totalBytes += decoded.length;
+    if (totalBytes > MAX_IMAGE_TOTAL_BYTES) throw new Error("本次图片总大小不能超过 20 MB");
+    return { mediaType, data };
+  });
+}
+
 function validDirectory(value) {
   if (typeof value !== "string" || !value.trim()) return false;
   try { return existsSync(value) && statSync(value).isDirectory(); } catch { return false; }
+}
+
+function selectWorkspaceDirectory(initialPath = "") {
+  return new Promise((resolvePromise, reject) => {
+    if (process.platform !== "win32") { reject(new Error("当前版本的目录选择器仅支持 Windows")); return; }
+    if (activeDirectoryPicker?.child && !activeDirectoryPicker.child.killed) activeDirectoryPicker.child.kill();
+    if (activeDirectoryPicker?.resultPath) rmSync(activeDirectoryPicker.resultPath, { force: true });
+    const helperPath = fileURLToPath(new URL("../scripts/select-workspace-folder.vbs", import.meta.url));
+    if (!existsSync(helperPath)) { reject(new Error("目录选择器组件缺失，请重新安装应用")); return; }
+    const resultPath = join(tmpdir(), `claude-code-white-folder-${randomUUID()}.txt`);
+    const pickerTitle = validDirectory(initialPath) ? `选择 Claude Code 工作区（当前：${resolve(initialPath)}）` : "选择 Claude Code 工作区";
+    // wscript 是 GUI 子系统进程：不会出现黑色控制台，同时允许 Shell 原生目录窗口正常置前。
+    const child = spawn("wscript.exe", ["//nologo", helperPath, resultPath, pickerTitle], {
+      stdio: "ignore",
+    });
+    activeDirectoryPicker = { child, resultPath };
+    let finished = false;
+    const cleanup = () => {
+      rmSync(resultPath, { force: true });
+      if (activeDirectoryPicker?.child === child) activeDirectoryPicker = null;
+    };
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      child.kill();
+      cleanup();
+      reject(new Error("目录选择器等待超时"));
+    }, 10 * 60 * 1000);
+    child.on("error", (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      let selected = "";
+      try {
+        if (existsSync(resultPath)) selected = readFileSync(resultPath, "utf16le").replace(/^\uFEFF/, "").trim();
+      } finally { cleanup(); }
+      if (code !== 0) { reject(new Error("无法打开目录选择器")); return; }
+      if (!selected) { resolvePromise(null); return; }
+      if (!validDirectory(selected)) { reject(new Error("选择的目录不可用")); return; }
+      resolvePromise(resolve(selected));
+    });
+  });
 }
 
 async function fetchJson(url, headers) {
@@ -635,7 +777,7 @@ async function handleRequest(request, response) {
 
   if (request.method === "GET" && url.pathname === "/api/status") {
     const claudePath = findClaude();
-    sendJson(response, 200, { bridge: true, bridgeProtocol: BRIDGE_PROTOCOL, capabilities: ["approval-strategies", "effort-levels"], claudeInstalled: Boolean(claudePath), claudePath, claudeVersion: claudeVersion(claudePath), pathEntries: (process.env.PATH || "").split(delimiter).length, cwd: process.cwd() }, origin);
+    sendJson(response, 200, { bridge: true, bridgeProtocol: BRIDGE_PROTOCOL, capabilities: ["approval-strategies", "effort-levels", "multi-image-input", "native-folder-picker", "live-steering"], claudeInstalled: Boolean(claudePath), claudePath, claudeVersion: claudeVersion(claudePath), pathEntries: (process.env.PATH || "").split(delimiter).length, cwd: process.cwd() }, origin);
     return;
   }
 
@@ -746,6 +888,17 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/workspace/select-directory") {
+    try {
+      const body = await readJson(request).catch(() => ({}));
+      const selected = await selectWorkspaceDirectory(typeof body.initialPath === "string" ? body.initialPath : "");
+      sendJson(response, 200, selected ? { path: selected, cancelled: false } : { path: "", cancelled: true }, origin);
+    } catch (error) {
+      sendJson(response, 500, { error: safeError(error) }, origin);
+    }
+    return;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/workspace/changes") {
     const dir = url.searchParams.get("path") || "";
     if (!validDirectory(dir)) { sendJson(response, 400, { error: "请提供有效的项目目录" }, origin); return; }
@@ -776,53 +929,131 @@ async function handleRequest(request, response) {
   if (request.method === "POST" && url.pathname === "/api/cancel") {
     const body = await readJson(request).catch(() => ({}));
     const child = typeof body.requestId === "string" ? running.get(body.requestId) : null;
-    if (child && !child.killed) { child.kill(); appendLog(`用户取消任务（${body.requestId}）`, "warn"); }
-    sendJson(response, 200, { cancelled: Boolean(child) }, origin);
+    const cancelled = terminateProcessTree(child);
+    if (cancelled) appendLog(`用户停止任务及其子进程（${body.requestId}）`, "warn");
+    sendJson(response, 200, { cancelled }, origin);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/steer") {
+    try {
+      const body = await readJson(request, MAX_RUN_REQUEST_CHARS);
+      const requestId = typeof body.requestId === "string" && /^[a-zA-Z0-9_-]{6,160}$/.test(body.requestId) ? body.requestId : null;
+      const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+      const images = parseRunImages(body.images);
+      if (!requestId || (!prompt && images.length === 0) || prompt.length > 100_000) throw new Error("插话内容为空或无效");
+      const child = running.get(requestId);
+      if (!child || child.killed || child.stdin.destroyed || child.stdin.writableEnded) {
+        sendJson(response, 409, { error: "当前任务已经结束，插话将保留在队列中" }, origin);
+        return;
+      }
+      const runState = runStates.get(child);
+      if (!runState?.initialized) {
+        sendJson(response, 409, { error: "Claude Code 控制通道尚未就绪，请稍后重试" }, origin);
+        return;
+      }
+      if (runState.pendingRedirects > 0) {
+        sendJson(response, 409, { error: "另一条消息正在插入，请等待 Claude 确认" }, origin);
+        return;
+      }
+      const content = [
+        ...images.map((image) => ({ type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } })),
+        ...(prompt ? [{ type: "text", text: prompt }] : []),
+      ];
+      const userMessage = { type: "user", message: { role: "user", content } };
+      runState.pendingRedirects += 1;
+      try {
+        await sendClaudeControlRequest(child, { subtype: "interrupt" });
+        writeRunUserMessage(child, userMessage);
+        appendLog(`Claude 已确认中断并接收调整方向（${requestId}）`);
+        sendJson(response, 200, { steered: true, acknowledged: true }, origin);
+      } finally {
+        runState.pendingRedirects -= 1;
+        maybeEndRunInput(child);
+      }
+    } catch (error) {
+      sendJson(response, 400, { error: error instanceof Error ? error.message : String(error) }, origin);
+    }
     return;
   }
 
   if (request.method !== "POST" || url.pathname !== "/api/run") { sendJson(response, 404, { error: "Not found" }, origin); return; }
 
   try {
-    const body = await readJson(request);
+    const body = await readJson(request, MAX_RUN_REQUEST_CHARS);
     const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+    const images = parseRunImages(body.images);
     const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
     const model = ALLOWED_MODELS.has(body.model) ? body.model : "sonnet";
     const permissionMode = ALLOWED_PERMISSION_MODES.has(body.permissionMode) ? body.permissionMode : "plan";
     const effort = ALLOWED_EFFORT_LEVELS.has(body.effort) ? body.effort : "medium";
     const sessionId = typeof body.sessionId === "string" && /^[a-zA-Z0-9_-]{6,160}$/.test(body.sessionId) ? body.sessionId : null;
     const requestId = typeof body.requestId === "string" && /^[a-zA-Z0-9_-]{6,160}$/.test(body.requestId) ? body.requestId : null;
-    if (!prompt || prompt.length > 100_000) throw new Error("任务内容为空或过长");
+    if ((!prompt && images.length === 0) || prompt.length > 100_000) throw new Error("任务内容为空或过长");
     if (!validDirectory(cwd)) throw new Error("请选择本机存在的项目目录");
 
     const claudePath = findClaude();
     if (!claudePath) throw new Error("没有检测到 Claude Code。请先安装并完成 claude 登录。");
-    const args = ["-p", "--output-format", "stream-json", "--verbose", "--model", model, "--permission-mode", permissionMode, "--effort", effort];
+    const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", model, "--permission-mode", permissionMode, "--effort", effort];
     if (sessionId) args.push("--resume", sessionId);
     const isCmd = process.platform === "win32" && claudePath.toLowerCase().endsWith(".cmd");
     const child = spawn(claudePath, args, { cwd, env: process.env, shell: isCmd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const runState = { initialized: false, messagesSent: 0, resultsSeen: 0, pendingRedirects: 0 };
+    runStates.set(child, runState);
     if (requestId) running.set(requestId, child);
     appendLog(`Claude Code 会话启动：${args.join(" ")}（cwd: ${cwd}）`);
 
     response.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Content-Type-Options": "nosniff", ...corsHeaders(origin) });
     child.stdout.pipe(response, { end: false });
+    let stdoutBuffer = "";
+    child.stdout.on("data", (chunk) => {
+      stdoutBuffer += chunk.toString("utf8");
+      const lines = stdoutBuffer.split("\n");
+      stdoutBuffer = lines.pop() || "";
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line);
+          if (event?.type === "control_response") settleControlResponse(child, event);
+          if (event?.type === "result") {
+            runState.resultsSeen += 1;
+            maybeEndRunInput(child);
+          }
+        } catch { /* 非完整 JSON 由下一块继续拼接 */ }
+      }
+    });
     let stderr = "";
     child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-12000); });
     child.on("error", (error) => {
+      rejectPendingControls(child, error);
       appendLog(`Claude Code 启动失败：${error.message}`, "error");
-      response.write(`${JSON.stringify({ type: "bridge_error", message: error.message })}\n`);
-      response.end();
+      if (!response.writableEnded) response.write(`${JSON.stringify({ type: "bridge_error", message: error.message })}\n`);
+      if (!response.writableEnded) response.end();
     });
     child.on("exit", (code) => {
+      rejectPendingControls(child, new Error("Claude Code 已退出"));
       if (requestId) running.delete(requestId);
       if (code !== 0 && code !== null) {
         appendLog(`Claude Code 异常退出（code ${code}）：${stderr.trim().slice(-200) || "无错误输出"}`, "error");
-        response.write(`${JSON.stringify({ type: "bridge_error", message: stderr.trim() || `Claude Code exited with code ${code}` })}\n`);
+        if (!response.writableEnded) response.write(`${JSON.stringify({ type: "bridge_error", message: stderr.trim() || `Claude Code exited with code ${code}` })}\n`);
       } else appendLog(`Claude Code 会话结束（code ${code}）`);
-      response.end();
+      if (!response.writableEnded) response.end();
     });
-    response.on("close", () => { if (!response.writableEnded && !child.killed) child.kill(); });
-    child.stdin.end(prompt);
+    response.on("close", () => { if (!response.writableEnded) terminateProcessTree(child); });
+    const content = [
+      ...images.map((image) => ({ type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } })),
+      ...(prompt ? [{ type: "text", text: prompt }] : []),
+    ];
+    try {
+      await sendClaudeControlRequest(child, { subtype: "initialize", hooks: null }, 15_000);
+      runState.initialized = true;
+      writeRunUserMessage(child, { type: "user", message: { role: "user", content } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      appendLog(`Claude Code 控制通道初始化失败：${message}`, "error");
+      if (!response.writableEnded) response.write(`${JSON.stringify({ type: "bridge_error", message: `Claude Code 控制通道初始化失败：${message}` })}\n`);
+      if (!response.writableEnded) response.end();
+      terminateProcessTree(child);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     appendLog(`任务被拒绝：${message}`, "warn");

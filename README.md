@@ -14,6 +14,7 @@ Typography is tuned for high-resolution desktop displays: a humanist serif for t
 - 自动检测本机 `claude` 命令与版本（PATH / npm 全局 / 原生安装 / WinGet 均支持）
 - 通过官方 headless 模式调用：`claude -p --output-format stream-json --verbose`
 - 1–3 个 Claude Code 会话并排流式运行，可拖拽重排、独立停止
+- 对话框支持一次上传多张图片：点击“＋”多选、批量拖拽或从剪贴板粘贴；发送前可预览、移除和放大查看
 - 每个窗格独立保存会话 ID、项目目录、模型和权限模式；会话可重命名、删除，新任务自动生成标题
 - 可搜索并恢复本机 Claude Code 历史任务，继续原始 session 上下文、项目目录和模型
 - `Ctrl+Shift+P` 快捷操作面板：新建/恢复任务、打开变更/文件/日志/记忆、切换检查面板与主题
@@ -30,6 +31,7 @@ Typography is tuned for high-resolution desktop displays: a humanist serif for t
 - Auto-detects your local `claude` binary and version (PATH / npm global / native install / WinGet)
 - Drives the official headless mode: `claude -p --output-format stream-json --verbose`
 - 1–3 Claude Code sessions streaming side by side; drag to reorder, stop independently
+- Multi-image input in every composer: multi-select from “＋”, batch drag-and-drop or clipboard paste, with preview/removal/lightbox before sending
 - Each pane keeps its own session ID, project directory, model and permission mode; rename, delete, auto-title
 - Search and resume local Claude Code history — original session context, directory and model
 - `Ctrl+Shift+P` command palette: new/resume tasks, open changes/files/logs/memory, toggle inspector & theme

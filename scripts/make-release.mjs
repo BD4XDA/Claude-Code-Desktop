@@ -8,9 +8,10 @@ import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } f
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
-// 输出放在项目同级目录，避免把发布产物复制进自身。
+// 临时发布目录放在项目同级；最终 zip 写回仓库根目录，供 GitHub 直接下载。
+// zip 本身列入排除项，避免下一次打包时把旧发布包嵌套进新包。
 const OUT = join(resolve(ROOT, ".."), "claude-code-white-release");
-const ZIP = join(resolve(ROOT, ".."), "claude-code-white-release.zip");
+const ZIP = join(ROOT, "claude-code-white-release.zip");
 
 const EXCLUDED_TOP = new Set([
   "node_modules",
@@ -20,6 +21,7 @@ const EXCLUDED_TOP = new Set([
   ".vinext",
   ".next",
   "release",
+  "claude-code-white-release.zip",
   ".openai",
   ".cache",
   "tsconfig.tsbuildinfo",

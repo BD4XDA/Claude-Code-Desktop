@@ -29,7 +29,8 @@ function Test-ClaudeCodeWhite([int]$Port, [int]$TimeoutMs = 1200) {
       if ([int]$response.StatusCode -ne 200) { return $false }
       $reader = New-Object IO.StreamReader($response.GetResponseStream())
       $payload = $reader.ReadToEnd() | ConvertFrom-Json
-      return [bool]$payload.bridge -and [int]$payload.bridgeProtocol -ge 2
+      # 实时插话由协议 6 引入。旧进程不能继续复用。
+      return [bool]$payload.bridge -and [int]$payload.bridgeProtocol -ge 9
     } finally { $response.Close() }
   } catch { return $false }
 }

@@ -5,7 +5,7 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Desktop = [Environment]::GetFolderPath('Desktop')
 $WScript = "$env:WINDIR\System32\wscript.exe"
 $Launcher = Join-Path $ProjectRoot 'Launch-Claude-Code-White.vbs'
-$Icon = Join-Path $ProjectRoot 'public\Claude-Code-White.ico'
+$Icon = Join-Path $ProjectRoot 'public\Claude-Code-White-Light.ico'
 $ClaudeIcon = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\claude.exe'
 $IconSource = if (Test-Path -LiteralPath $Icon) { $Icon } elseif (Test-Path -LiteralPath $ClaudeIcon) { $ClaudeIcon } else { $WScript }
 

@@ -1,12 +1,16 @@
 "use client";
+/* eslint-disable @next/next/no-img-element -- Local image data URLs should bypass the remote image optimizer. */
 
-import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent, FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type BridgeStatus = { bridge: boolean; claudeInstalled: boolean; claudeVersion?: string; claudePath?: string; cwd?: string };
+type BridgeStatus = { bridge: boolean; bridgeProtocol?: number; capabilities?: string[]; claudeInstalled: boolean; claudeVersion?: string; claudePath?: string; cwd?: string };
 type TimelineItem = { kind: "thinking" | "tool" | "file" | "result"; title: string; detail: string; state?: "done" | "running" };
 type ToolCall = { id: string; name: string; input: string; state: "running" | "done" | "error"; result?: string };
 type Usage = { input: number; output: number; cache: number; cost: number };
-type Message = { id: string; role: "user" | "assistant"; body: string; timeline?: TimelineItem[]; tools?: ToolCall[]; processOpen?: boolean; elapsedMs?: number; usage?: { input: number; output: number; cache: number; cost: number } };
+type MessageImage = { id: string; name: string; mediaType: string; dataUrl: string };
+type DraftImage = MessageImage & { size: number; data: string };
+type QueuedTurn = { id: string; body: string; images: DraftImage[]; createdAt: number; state?: "queued" | "steering" | "steered" };
+type Message = { id: string; role: "user" | "assistant"; body: string; images?: MessageImage[]; timeline?: TimelineItem[]; tools?: ToolCall[]; processOpen?: boolean; elapsedMs?: number; usage?: { input: number; output: number; cache: number; cost: number } };
 type PermissionMode = "plan" | "manual" | "acceptEdits" | "auto" | "dontAsk";
 type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 type Session = {
@@ -65,6 +69,23 @@ type MemoryWorkspaceOption = { id: string; label: string };
 type MemoryForm = { open: boolean; workspaceId: string; name: string; description: string; type: string; body: string; editingFile: string | null; saving: boolean };
 type HistorySession = { id: string; projectId: string; cwd: string; slug: string; title: string; preview: string; model: string; updatedAt: string; size: number };
 type HistoryDetail = { id: string; projectId: string; cwd: string; model: string; title: string; messages: Array<{ role: "user" | "assistant"; body: string; timestamp: string | null }>; truncated: boolean };
+type BrowserSpeechResult = { isFinal: boolean; 0: { transcript: string } };
+type BrowserSpeechEvent = Event & { resultIndex: number; results: ArrayLike<BrowserSpeechResult> };
+type BrowserSpeechErrorEvent = Event & { error: string; message?: string };
+type BrowserSpeechRecognition = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+  onstart: (() => void) | null;
+  onresult: ((event: BrowserSpeechEvent) => void) | null;
+  onerror: ((event: BrowserSpeechErrorEvent) => void) | null;
+  onend: (() => void) | null;
+};
+type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
 type CommandId = "new" | "history" | "changes" | "files" | "terminal" | "memory" | "inspector" | "theme";
 
 const MEMORY_TYPE_LABEL: Record<string, string> = { user: "用户", feedback: "反馈", project: "项目", reference: "参考" };
@@ -87,6 +108,26 @@ const EFFORT_OPTIONS: Array<{ value: EffortLevel; label: string; short: string; 
   { value: "xhigh", label: "极强", short: "极强", bars: 4, description: "更长时间分析，适合架构和困难问题" },
   { value: "max", label: "最大", short: "最大", bars: 5, description: "使用最大推理投入，速度最慢且消耗更高" },
 ];
+const IMAGE_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const IMAGE_ACCEPT = "image/jpeg,image/png,image/gif,image/webp";
+const MAX_IMAGES_PER_MESSAGE = 10;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
+const REQUIRED_BRIDGE_PROTOCOL = 9;
+
+function readDraftImage(file: File): Promise<DraftImage> {
+  return new Promise((resolvePromise, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`无法读取图片：${file.name}`));
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      const separator = dataUrl.indexOf(",");
+      if (separator < 0) { reject(new Error(`无法读取图片：${file.name}`)); return; }
+      resolvePromise({ id: crypto.randomUUID(), name: file.name || "剪贴板图片", mediaType: file.type, size: file.size, dataUrl, data: dataUrl.slice(separator + 1) });
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 // 同源优先（npm run dev 已内置桥接），回退到独立桥接进程 4318（生产模式）。
 let BRIDGE_BASE = "http://127.0.0.1:4318";
@@ -116,6 +157,21 @@ function makeSession(id: string, title: string, projectPath = ""): Session {
   };
 }
 
+function normalizeWorkspacePath(path: string) {
+  return path.trim().replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function workspaceName(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || "未选择工作区";
+}
+
+function mergeVoiceDraft(base: string, transcript: string) {
+  const spoken = transcript.trim();
+  if (!spoken) return base;
+  const needsSpace = Boolean(base) && !/\s$/.test(base) && !/[\u3400-\u9fff]$/.test(base) && !/^[\u3400-\u9fff]/.test(spoken);
+  return `${base}${needsSpace ? " " : ""}${spoken}`;
+}
+
 const initialSessions = [
   makeSession("session-main", "完善 Claude Code 桌面端"),
   makeSession("session-tests", "运行测试并检查问题"),
@@ -126,8 +182,39 @@ function ClaudeMark({ small = false }: { small?: boolean }) {
   return <span className={`claude-mark ${small ? "small" : ""}`} aria-hidden="true"/>;
 }
 
+type UiIconName = "plus" | "chat" | "search" | "history" | "folder" | "changes" | "split" | "edit" | "trash" | "usage" | "send" | "stop" | "workspace" | "microphone" | "sidebarCollapse" | "sidebarExpand";
+
+function UiIcon({ name, size = 16 }: { name: UiIconName; size?: number }) {
+  const paths: Record<UiIconName, React.ReactNode> = {
+    plus: <><path d="M12 5v14M5 12h14"/></>,
+    chat: <><path d="M5 6.5h14v9.5H9l-4 3v-12.5Z"/></>,
+    search: <><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/></>,
+    history: <><path d="M4.5 8.5A8 8 0 1 1 5 16M4.5 4.5v4h4"/><path d="M12 8v4l3 2"/></>,
+    folder: <><path d="M3.5 6.5h6l2 2h9v9.5h-17Z"/></>,
+    changes: <><path d="M7 4v14M17 6v14M4.5 7 7 4l2.5 3M14.5 17 17 20l2.5-3"/></>,
+    split: <><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M12 5v14"/></>,
+    edit: <><path d="m5 17-.5 3 3-.5L18 7l-2.5-2.5Z"/><path d="m13.5 6.5 2.5 2.5"/></>,
+    trash: <><path d="M5 7h14M9 7V4.5h6V7M7 7l1 13h8l1-13M10 10v6M14 10v6"/></>,
+    usage: <><path d="M5 18V11M10 18V7M15 18V4M20 18V9"/></>,
+    send: <><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"/></>,
+    stop: <><rect x="7" y="7" width="10" height="10" rx="2"/></>,
+    workspace: <><path d="M4 7.5h6l2 2h8v9H4Z"/><path d="M4 7.5V5h6l2 2.5"/></>,
+    microphone: <><rect x="9" y="4" width="6" height="11" rx="3"/><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v3M9 20h6"/></>,
+    sidebarCollapse: <><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9 4.5v15M16 9l-3 3 3 3"/></>,
+    sidebarExpand: <><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9 4.5v15M13 9l3 3-3 3"/></>,
+  };
+  return <svg className="ui-icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
 function IconButton({ label, children, onClick, active = false }: { label: string; children: React.ReactNode; onClick?: () => void; active?: boolean }) {
   return <button type="button" className={`icon-button ${active ? "active" : ""}`} aria-label={label} title={label} onClick={onClick}>{children}</button>;
+}
+
+function SidebarToggle({ expanded, onClick, placement }: { expanded: boolean; onClick: () => void; placement: "sidebar" | "topbar" }) {
+  const label = expanded ? "收起侧栏" : "展开侧栏";
+  return <button type="button" className={`sidebar-toggle-button in-${placement}`} aria-label={`${label}（Ctrl+B）`} title={`${label}（Ctrl+B）`} aria-expanded={expanded} onClick={onClick}>
+    <UiIcon name={expanded ? "sidebarCollapse" : "sidebarExpand"} size={17}/>
+  </button>;
 }
 
 function closeControlMenu(event: React.MouseEvent<HTMLButtonElement>) {
@@ -137,22 +224,9 @@ function closeControlMenu(event: React.MouseEvent<HTMLButtonElement>) {
 function keepOnlyOneControlOpen(event: React.SyntheticEvent<HTMLDetailsElement>) {
   const current = event.currentTarget;
   if (!current.open) return;
-  current.parentElement?.querySelectorAll<HTMLDetailsElement>("details.composer-control[open]").forEach((control) => {
+  current.closest(".composer")?.querySelectorAll<HTMLDetailsElement>("details.composer-control[open]").forEach((control) => {
     if (control !== current) control.open = false;
   });
-}
-
-function ModelControl({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  const selected = MODEL_OPTIONS.find((option) => option.value === value) || MODEL_OPTIONS[0];
-  return <details className="composer-control model-control" onToggle={keepOnlyOneControlOpen}>
-    <summary title={`模型：${selected.label}`}><span className="model-glyph" aria-hidden="true"/><span>{selected.label}</span><i>⌄</i></summary>
-    <div className="control-popover model-popover">
-      <header><strong>选择模型</strong><span>为下一轮 Claude Code 任务选择模型</span></header>
-      <div>{MODEL_OPTIONS.map((option) => <button type="button" className={option.value === value ? "selected" : ""} key={option.value} onClick={(event) => { onChange(option.value); closeControlMenu(event); }}>
-        <span className="model-option-icon"><i aria-hidden="true"/>{option.badge}</span><span><strong>{option.label}</strong><small>{option.description}</small></span>{option.value === value && <b>✓</b>}
-      </button>)}</div>
-    </div>
-  </details>;
 }
 
 function PermissionControl({ value, sending, onChange }: { value: PermissionMode; sending: boolean; onChange: (value: PermissionMode) => void }) {
@@ -169,16 +243,71 @@ function PermissionControl({ value, sending, onChange }: { value: PermissionMode
   </details>;
 }
 
-function EffortControl({ value, sending, onChange }: { value: EffortLevel; sending: boolean; onChange: (value: EffortLevel) => void }) {
-  const selected = EFFORT_OPTIONS.find((option) => option.value === value) || EFFORT_OPTIONS[1];
-  return <details className="composer-control effort-control" onToggle={keepOnlyOneControlOpen}>
-    <summary title={`思考强度：${selected.label}`}><span className="effort-bars" aria-hidden="true">{[1,2,3,4,5].map((bar) => <i className={bar <= selected.bars ? "on" : ""} key={bar}/>)}</span><span>{selected.short}</span><i>⌄</i></summary>
-    <div className="control-popover effort-popover">
-      <header><strong>思考强度</strong><span>{sending ? "已更新，将从下一轮推理生效" : "实时更新当前会话的后续推理"}</span></header>
-      <div>{EFFORT_OPTIONS.map((option) => <button type="button" className={option.value === value ? "selected" : ""} key={option.value} onClick={(event) => { onChange(option.value); closeControlMenu(event); }}>
-        <span className="effort-option-bars">{[1,2,3,4,5].map((bar) => <i className={bar <= option.bars ? "on" : ""} key={bar}/>)}</span><span><strong>{option.label}</strong><small>{option.description}</small></span>{option.value === value && <b>✓</b>}
-      </button>)}</div>
-      <footer>较高强度通常需要更长时间，并可能增加 token 消耗。</footer>
+function ClaudeSettingsControl({ model, effort, sending, onModelChange, onEffortChange }: { model: string; effort: EffortLevel; sending: boolean; onModelChange: (value: string) => void; onEffortChange: (value: EffortLevel) => void }) {
+  const selectedModel = MODEL_OPTIONS.find((option) => option.value === model) || MODEL_OPTIONS[0];
+  const selectedEffort = EFFORT_OPTIONS.find((option) => option.value === effort) || EFFORT_OPTIONS[1];
+  const effortIndex = Math.max(0, EFFORT_OPTIONS.findIndex((option) => option.value === selectedEffort.value));
+  const effortStep = 100 / Math.max(1, EFFORT_OPTIONS.length - 1);
+  const [panel, setPanel] = useState<"quick" | "main" | "model" | "effort">("quick");
+  const [sliderActive, setSliderActive] = useState(false);
+  const [sliderValue, setSliderValue] = useState(effortIndex * effortStep);
+  const sliderValueRef = useRef(effortIndex * effortStep);
+  function applySliderDetent(nextValue: number) {
+    const raw = Math.max(0, Math.min(100, nextValue));
+    const nearestIndex = Math.max(0, Math.min(EFFORT_OPTIONS.length - 1, Math.round(raw / effortStep)));
+    const stop = nearestIndex * effortStep;
+    const detentRadius = 4.5;
+    const distance = raw - stop;
+    if (Math.abs(distance) <= detentRadius) return stop;
+    const segmentStart = Math.max(0, stop - effortStep / 2);
+    const segmentEnd = Math.min(100, stop + effortStep / 2);
+    if (distance < 0) {
+      const travel = stop - detentRadius - segmentStart;
+      return travel <= 0 ? stop : segmentStart + (raw - segmentStart) / travel * (stop - segmentStart);
+    }
+    const travel = segmentEnd - stop - detentRadius;
+    return travel <= 0 ? stop : stop + (raw - stop - detentRadius) / travel * (segmentEnd - stop);
+  }
+  function updateSlider(nextValue: number) {
+    const bounded = applySliderDetent(nextValue);
+    const nextIndex = Math.max(0, Math.min(EFFORT_OPTIONS.length - 1, Math.round(bounded / effortStep)));
+    sliderValueRef.current = bounded;
+    setSliderValue(bounded);
+    if (EFFORT_OPTIONS[nextIndex].value !== selectedEffort.value) onEffortChange(EFFORT_OPTIONS[nextIndex].value);
+  }
+  function settleSlider() {
+    const nextIndex = Math.max(0, Math.min(EFFORT_OPTIONS.length - 1, Math.round(sliderValueRef.current / effortStep)));
+    const snapped = nextIndex * effortStep;
+    sliderValueRef.current = snapped;
+    setSliderValue(snapped);
+    setSliderActive(false);
+    if (EFFORT_OPTIONS[nextIndex].value !== selectedEffort.value) onEffortChange(EFFORT_OPTIONS[nextIndex].value);
+  }
+  return <details className="composer-control claude-settings-control" onToggle={(event) => { keepOnlyOneControlOpen(event); if (event.currentTarget.open) { const snapped = effortIndex * effortStep; setPanel("quick"); setSliderActive(false); sliderValueRef.current = snapped; setSliderValue(snapped); } else settleSlider(); }}>
+    <summary className={`effort-size-${effortIndex}`} title={`选择模型与思考强度：${selectedModel.label} · ${selectedEffort.label}（Ctrl+Shift+M）`}><span className="settings-bolt" aria-hidden="true">✦</span><span>{selectedModel.label} · {selectedEffort.short}</span><i>⌄</i></summary>
+    <div className={`control-popover claude-settings-popover panel-${panel}`}>
+      {panel === "quick" ? <div className={`effort-quick-panel ${sliderActive ? "adjusting" : ""}`}>
+        <div className="effort-quick-heading">{sliderActive ? <><span>更高效</span><span>更智能</span></> : <><button type="button" onClick={() => setPanel("main")}>高级 <i>›</i></button><b aria-hidden="true">✦</b></>}</div>
+        <div className="ion-slider">
+          <span className="ion-slider-start-cap" aria-hidden="true"/>
+          <span className="ion-slider-fill" style={{ clipPath: `inset(0 ${100 - sliderValue}% 0 0)` }}><span className="ion-particles" aria-hidden="true">{Array.from({ length: 14 }, (_, index) => <i key={index}/>)}</span></span>
+          <span className="ion-slider-stops" aria-hidden="true">{EFFORT_OPTIONS.map((option, index) => <i className={index * effortStep <= sliderValue ? "passed" : ""} key={option.value}/>)}</span>
+          <input type="range" min="0" max="100" step="0.1" value={sliderValue} aria-label="快速调整思考强度" aria-valuetext={selectedEffort.label} onChange={(event) => updateSlider(Number(event.currentTarget.value))} onKeyDown={(event) => { const direction = event.key === "ArrowRight" || event.key === "ArrowUp" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowDown" ? -1 : 0; if (direction) { event.preventDefault(); updateSlider(Math.round(sliderValue / effortStep) * effortStep + direction * effortStep); settleSlider(); } }} onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); setSliderActive(true); }} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); settleSlider(); }} onPointerCancel={settleSlider} onBlur={settleSlider}/>
+        </div>
+      </div> : panel === "main" ? <>
+        <div className="settings-overview">
+          <button type="button" onClick={() => setPanel("model")}><span>模型</span><b>{selectedModel.label}</b><i>›</i></button>
+          <button type="button" onClick={() => setPanel("effort")}><span>思考强度</span><b>{selectedEffort.label}</b><i>›</i></button>
+        </div>
+        <footer>{sending ? "更改将从下一轮推理生效" : "这些设置仅作用于当前 Claude Code 会话"}</footer>
+      </> : <>
+        <header className="settings-subheader"><button type="button" aria-label="返回会话设置" onClick={() => setPanel("main")}>‹</button><span><strong>{panel === "model" ? "选择模型" : "思考强度"}</strong><small>{panel === "model" ? "选择下一轮使用的 Claude 模型" : "控制后续任务的推理投入"}</small></span></header>
+        <div>{panel === "model" ? MODEL_OPTIONS.map((option) => <button type="button" className={option.value === model ? "selected" : ""} key={option.value} onClick={() => { onModelChange(option.value); setPanel("main"); }}>
+          <span className="model-option-icon"><i aria-hidden="true"/>{option.badge}</span><span><strong>{option.label}</strong><small>{option.description}</small></span>{option.value === model && <b>✓</b>}
+        </button>) : EFFORT_OPTIONS.map((option, optionIndex) => <button type="button" className={option.value === effort ? "selected" : ""} key={option.value} onClick={() => { const snapped = optionIndex * effortStep; onEffortChange(option.value); sliderValueRef.current = snapped; setSliderValue(snapped); setPanel("main"); }}>
+          <span className="effort-option-bars">{[1,2,3,4,5].map((bar) => <i className={bar <= option.bars ? "on" : ""} key={bar}/>)}</span><span><strong>{option.label}</strong><small>{option.description}</small></span>{option.value === effort && <b>✓</b>}
+        </button>)}</div>
+      </>}
     </div>
   </details>;
 }
@@ -296,6 +425,7 @@ export default function Home() {
   const [activeId, setActiveId] = useState("session-main");
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [mobileSidebar, setMobileSidebar] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [inspector, setInspector] = useState(true);
   const [inspectorTab, setInspectorTab] = useState<"changes" | "files" | "terminal" | "memory">("changes");
   const [usageOpen, setUsageOpen] = useState(false);
@@ -320,6 +450,10 @@ export default function Home() {
   const stickToBottomRef = useRef(new Map<string, boolean>());
   const usageDragRef = useRef<{ startX: number; startProgress: number; progress: number; travel: number; moved: boolean; left: number; width: number } | null>(null);
   const usageWasDragged = useRef(false);
+  const queueLaunchingRef = useRef(new Set<string>());
+  const speechRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const speechSessionIdRef = useRef<string | null>(null);
+  const speechDraftBaseRef = useRef("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [changes, setChanges] = useState<WorkspaceChanges | null>(null);
@@ -340,17 +474,29 @@ export default function Home() {
   const [truncatedDirs, setTruncatedDirs] = useState<Set<string>>(new Set());
   const [memoryWorkspaces, setMemoryWorkspaces] = useState<MemoryWorkspaceOption[]>([]);
   const [memoryForm, setMemoryForm] = useState<MemoryForm>({ open: false, workspaceId: "", name: "", description: "", type: "project", body: "", editingFile: null, saving: false });
+  const [draftImages, setDraftImages] = useState<Record<string, DraftImage[]>>({});
+  const [imageNotices, setImageNotices] = useState<Record<string, string>>({});
+  const [imageDragSessionId, setImageDragSessionId] = useState<string | null>(null);
+  const [previewImage, setPreviewImage] = useState<MessageImage | null>(null);
+  const [queuedTurns, setQueuedTurns] = useState<Record<string, QueuedTurn[]>>({});
+  const [stoppingSessionIds, setStoppingSessionIds] = useState<Set<string>>(new Set());
+  const [folderPickingId, setFolderPickingId] = useState<string | null>(null);
+  const [workspaceNotice, setWorkspaceNotice] = useState("");
+  const [usageProviderOpen, setUsageProviderOpen] = useState<string>("deepseek");
+  const [listeningSessionId, setListeningSessionId] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
         const storedTheme = localStorage.getItem("claude-code-theme");
         const storedSessions = localStorage.getItem("claude-code-sessions");
+        const storedSidebar = localStorage.getItem("claude-code-sidebar-collapsed");
         if (storedTheme === "dark" || storedTheme === "light") setTheme(storedTheme);
+        if (storedSidebar === "true") setSidebarCollapsed(true);
         if (storedSessions) {
           const parsed = JSON.parse(storedSessions) as { sessions: Session[]; visibleIds: string[]; activeId: string };
           if (parsed.sessions?.length) {
-            setSessions(parsed.sessions.map((session) => ({ ...session, sending: false, draft: session.draft || "", effort: EFFORT_OPTIONS.some((option) => option.value === session.effort) ? session.effort : "medium", permissionMode: String(session.permissionMode) === "default" ? "manual" : PERMISSION_OPTIONS.some((option) => option.value === session.permissionMode) ? session.permissionMode : "plan" })));
+            setSessions(parsed.sessions.map((session) => ({ ...session, sending: false, draft: session.draft || "", messages: (session.messages || [welcome]).map((message) => ({ ...message, images: undefined })), effort: EFFORT_OPTIONS.some((option) => option.value === session.effort) ? session.effort : "medium", permissionMode: String(session.permissionMode) === "default" ? "manual" : PERMISSION_OPTIONS.some((option) => option.value === session.permissionMode) ? session.permissionMode : "plan" })));
             setVisibleIds(parsed.visibleIds?.slice(0, 3) || [parsed.sessions[0].id]);
             setActiveId(parsed.activeId || parsed.sessions[0].id);
           }
@@ -361,6 +507,18 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, []);
 
+  useEffect(() => () => {
+    const recognition = speechRecognitionRef.current;
+    speechRecognitionRef.current = null;
+    speechSessionIdRef.current = null;
+    if (!recognition) return;
+    recognition.onstart = null;
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+    try { recognition.abort(); } catch { /* Recognition may already be closed. */ }
+  }, []);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("claude-code-theme", theme);
@@ -368,8 +526,19 @@ export default function Home() {
 
   useEffect(() => {
     if (!hydrated) return;
-    localStorage.setItem("claude-code-sessions", JSON.stringify({ sessions, visibleIds, activeId }));
+    // 图片只停留在当前运行中的本机会话，不把体积较大的 base64 写入 localStorage。
+    const persistableSessions = sessions.map((session) => ({ ...session, messages: session.messages.map((message) => {
+      const persistable = { ...message };
+      delete persistable.images;
+      return persistable;
+    }) }));
+    localStorage.setItem("claude-code-sessions", JSON.stringify({ sessions: persistableSessions, visibleIds, activeId }));
   }, [sessions, visibleIds, activeId, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    localStorage.setItem("claude-code-sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed, hydrated]);
 
   // 会话流式输出时自动跟随底部；用户向上翻历史则暂停，滚回底部附近后恢复
   function handlePaneScroll(id: string) {
@@ -411,6 +580,20 @@ export default function Home() {
     if (!query) return sessions;
     return sessions.filter((session) => `${session.title} ${session.projectPath}`.toLowerCase().includes(query));
   }, [sessions, searchQuery]);
+  const workspaceSessionGroups = useMemo(() => {
+    const groups = new Map<string, { key: string; path: string; label: string; sessions: Session[] }>();
+    for (const session of visibleSessions) {
+      const key = normalizeWorkspacePath(session.projectPath) || "__unassigned__";
+      const group = groups.get(key) || { key, path: session.projectPath, label: workspaceName(session.projectPath), sessions: [] };
+      group.sessions.push(session);
+      groups.set(key, group);
+    }
+    return [...groups.values()].sort((left, right) => {
+      const leftActive = left.sessions.some((session) => session.id === activeId) ? 1 : 0;
+      const rightActive = right.sessions.some((session) => session.id === activeId) ? 1 : 0;
+      return rightActive - leftActive || left.label.localeCompare(right.label, "zh-CN");
+    });
+  }, [activeId, visibleSessions]);
   const localUsage = useMemo(() => sessions.reduce((total, session) => ({
     input: total.input + session.usage.input,
     output: total.output + session.usage.output,
@@ -632,6 +815,14 @@ export default function Home() {
         setCommandOpen(false);
         setHistoryOpen(false);
         setUsageOpen(false);
+        setPreviewImage(null);
+        setMobileSidebar(false);
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        if (window.matchMedia("(max-width: 820px)").matches) setMobileSidebar((value) => !value);
+        else setSidebarCollapsed((value) => !value);
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "p") {
@@ -639,6 +830,12 @@ export default function Home() {
         setCommandQuery("");
         setCommandSelected(0);
         setCommandOpen(true);
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        const control = document.querySelector<HTMLDetailsElement>(".session-pane.active .claude-settings-control");
+        if (control) control.open = !control.open;
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
@@ -682,12 +879,70 @@ export default function Home() {
     await recheckStatus();
   }
 
-  function addContext(id: string) {
-    const current = sessions.find((session) => session.id === id);
-    if (!current) return;
-    const state = changes?.isGit ? ` · 分支 ${changes.branch} · ${changes.entries.length} 项未提交变更` : "";
-    const context = `[上下文] 项目：${current.projectPath}${state}\n`;
-    patchSession(id, (item) => ({ ...item, draft: item.draft ? `${item.draft}\n${context}` : context }));
+  async function addDraftImages(id: string, incoming: File[]) {
+    const files = incoming.filter((file): file is File => file instanceof File);
+    if (!files.length) return;
+    const existing = draftImages[id] || [];
+    const unsupported = files.find((file) => !IMAGE_MEDIA_TYPES.has(file.type));
+    const tooLarge = files.find((file) => file.size > MAX_IMAGE_BYTES);
+    const nextTotal = existing.reduce((sum, image) => sum + image.size, 0) + files.reduce((sum, file) => sum + file.size, 0);
+    let notice = "";
+    if (unsupported) notice = `${unsupported.name || "所选文件"} 不是支持的图片格式。请选择 JPG、PNG、GIF 或 WebP。`;
+    else if (existing.length + files.length > MAX_IMAGES_PER_MESSAGE) notice = `每次最多上传 ${MAX_IMAGES_PER_MESSAGE} 张图片。`;
+    else if (tooLarge) notice = `${tooLarge.name} 超过单张 5 MB 的限制。`;
+    else if (nextTotal > MAX_IMAGE_TOTAL_BYTES) notice = "本次图片总大小不能超过 20 MB。";
+    if (notice) { setImageNotices((current) => ({ ...current, [id]: notice })); return; }
+    try {
+      const additions = await Promise.all(files.map(readDraftImage));
+      setDraftImages((current) => ({ ...current, [id]: [...(current[id] || []), ...additions] }));
+      setImageNotices((current) => ({ ...current, [id]: "" }));
+    } catch (error) {
+      setImageNotices((current) => ({ ...current, [id]: error instanceof Error ? error.message : "图片读取失败，请重新选择。" }));
+    }
+  }
+
+  function closeSidebar() {
+    if (window.matchMedia("(max-width: 820px)").matches) setMobileSidebar(false);
+    else setSidebarCollapsed(true);
+  }
+
+  function openSidebar() {
+    if (window.matchMedia("(max-width: 820px)").matches) setMobileSidebar(true);
+    else setSidebarCollapsed(false);
+  }
+
+  function removeDraftImage(id: string, imageId: string) {
+    setDraftImages((current) => ({ ...current, [id]: (current[id] || []).filter((image) => image.id !== imageId) }));
+    setImageNotices((current) => ({ ...current, [id]: "" }));
+  }
+
+  function handleImagePaste(event: ReactClipboardEvent<HTMLTextAreaElement>, id: string) {
+    const files = Array.from(event.clipboardData.items).filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter((file): file is File => Boolean(file));
+    if (!files.length) return;
+    if (!event.clipboardData.getData("text/plain")) event.preventDefault();
+    void addDraftImages(id, files);
+  }
+
+  function handleImageDrag(event: ReactDragEvent<HTMLFormElement>, id: string) {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    setImageDragSessionId(id);
+  }
+
+  function handleImageDragLeave(event: ReactDragEvent<HTMLFormElement>, id: string) {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    if (imageDragSessionId === id) setImageDragSessionId(null);
+  }
+
+  function handleImageDrop(event: ReactDragEvent<HTMLFormElement>, id: string) {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setImageDragSessionId(null);
+    void addDraftImages(id, Array.from(event.dataTransfer.files));
   }
 
   function renderTreeRows(dir: string, depth: number): React.ReactNode {
@@ -716,6 +971,79 @@ export default function Home() {
     setSessions((current) => current.map((session) => session.id === id ? updater(session) : session));
   }
 
+  function cancelVoiceInput() {
+    const recognition = speechRecognitionRef.current;
+    speechRecognitionRef.current = null;
+    speechSessionIdRef.current = null;
+    setListeningSessionId(null);
+    if (!recognition) return;
+    recognition.onstart = null;
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+    try { recognition.abort(); } catch { /* Recognition may already be closed. */ }
+  }
+
+  function toggleVoiceInput(id: string) {
+    if (speechSessionIdRef.current === id && speechRecognitionRef.current) {
+      try { speechRecognitionRef.current.stop(); } catch { cancelVoiceInput(); }
+      return;
+    }
+
+    if (speechRecognitionRef.current) cancelVoiceInput();
+    const current = sessions.find((session) => session.id === id);
+    if (!current) return;
+    const speechWindow = window as typeof window & { SpeechRecognition?: BrowserSpeechRecognitionConstructor; webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor };
+    const Recognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+    if (!Recognition) {
+      setWorkspaceNotice("当前浏览器不支持语音转文字。请使用最新版 Chrome 打开 Claude Code White。");
+      return;
+    }
+
+    const recognition = new Recognition();
+    speechRecognitionRef.current = recognition;
+    speechSessionIdRef.current = id;
+    speechDraftBaseRef.current = current.draft;
+    recognition.lang = "zh-CN";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.onstart = () => {
+      if (speechRecognitionRef.current === recognition) setListeningSessionId(id);
+    };
+    recognition.onresult = (event) => {
+      if (speechRecognitionRef.current !== recognition) return;
+      let transcript = "";
+      for (let index = 0; index < event.results.length; index += 1) transcript += event.results[index][0]?.transcript || "";
+      const draft = mergeVoiceDraft(speechDraftBaseRef.current, transcript);
+      patchSession(id, (session) => ({ ...session, draft }));
+    };
+    recognition.onerror = (event) => {
+      if (speechRecognitionRef.current !== recognition || event.error === "aborted") return;
+      const message = event.error === "not-allowed" || event.error === "service-not-allowed"
+        ? "麦克风权限被拒绝。请点击 Chrome 地址栏旁的权限图标，允许此应用使用麦克风。"
+        : event.error === "audio-capture"
+          ? "没有检测到可用的麦克风，请检查设备连接。"
+          : event.error === "no-speech"
+            ? "没有听到语音，请靠近麦克风后重试。"
+            : "语音识别暂时不可用，请检查网络后重试。";
+      setWorkspaceNotice(message);
+    };
+    recognition.onend = () => {
+      if (speechRecognitionRef.current !== recognition) return;
+      speechRecognitionRef.current = null;
+      speechSessionIdRef.current = null;
+      setListeningSessionId((currentId) => currentId === id ? null : currentId);
+    };
+    setWorkspaceNotice("");
+    setListeningSessionId(id);
+    try { recognition.start(); }
+    catch {
+      cancelVoiceInput();
+      setWorkspaceNotice("无法启动语音输入，请确认 Chrome 已获得麦克风权限。");
+    }
+  }
+
   function openSession(id: string, alongside = false) {
     setActiveId(id);
     setVisibleIds((current) => {
@@ -732,6 +1060,7 @@ export default function Home() {
     setSessions((current) => [next, ...current]);
     setVisibleIds((current) => [...current, id].slice(-3));
     setActiveId(id);
+    setMobileSidebar(false);
   }
 
   function closePane(id: string) {
@@ -753,8 +1082,11 @@ export default function Home() {
   function deleteSession(id: string) {
     if (sessions.length <= 1) return;
     if (!window.confirm("删除这个任务？它会从列表移除，Claude Code 本机记录不受影响。")) return;
+    if (speechSessionIdRef.current === id) cancelVoiceInput();
     const remaining = sessions.filter((item) => item.id !== id);
     setSessions(remaining);
+    setQueuedTurns((current) => { const next = { ...current }; delete next[id]; return next; });
+    setDraftImages((current) => { const next = { ...current }; delete next[id]; return next; });
     setVisibleIds((current) => {
       const next = current.filter((item) => item !== id);
       return next.length ? next : [remaining[0].id];
@@ -778,22 +1110,74 @@ export default function Home() {
   async function chooseProject(id: string) {
     const current = sessions.find((session) => session.id === id);
     if (!current) return;
-    const nextPath = window.prompt("请输入 Claude Code 工作目录", current.projectPath);
-    if (nextPath?.trim()) patchSession(id, (session) => ({ ...session, projectPath: nextPath.trim() }));
+    if (!status.bridge) {
+      setWorkspaceNotice("本地桥接未启动，暂时无法打开目录选择器。");
+      return;
+    }
+    if ((status.bridgeProtocol || 0) < REQUIRED_BRIDGE_PROTOCOL || !status.capabilities?.includes("native-folder-picker")) {
+      setWorkspaceNotice("当前仍是旧版后台。请完全退出 Claude Code White 后重新打开，再选择工作区。");
+      return;
+    }
+    setFolderPickingId(id);
+    setWorkspaceNotice("");
+    try {
+      const response = await fetch(api("/api/workspace/select-directory"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initialPath: current.projectPath }),
+      });
+      const payload = await response.json().catch(() => null) as { path?: string; cancelled?: boolean; error?: string } | null;
+      if (!response.ok) throw new Error(payload?.error || "目录选择器未能打开");
+      if (payload?.path) {
+        patchSession(id, (session) => ({ ...session, projectPath: payload.path as string, claudeSessionId: null }));
+        if (id === activeId) {
+          setTreeCache({});
+          setExpandedDirs(new Set());
+          setFilePreview(null);
+          void loadChanges(payload.path);
+        }
+      }
+    } catch (error) {
+      setWorkspaceNotice(error instanceof Error ? error.message : "目录选择失败，请稍后重试。");
+    } finally {
+      setFolderPickingId(null);
+    }
   }
 
   async function submit(event: FormEvent, id: string) {
     event.preventDefault();
+    if (speechSessionIdRef.current === id) cancelVoiceInput();
     const current = sessions.find((session) => session.id === id);
-    if (!current || !current.draft.trim() || current.sending) return;
+    const images = draftImages[id] || [];
+    if (!current || (!current.draft.trim() && images.length === 0)) return;
     const prompt = current.draft.trim();
+    if (current.sending) {
+      const queued: QueuedTurn = { id: crypto.randomUUID(), body: prompt, images, createdAt: Date.now() };
+      setQueuedTurns((all) => ({ ...all, [id]: [...(all[id] || []), queued] }));
+      setDraftImages((all) => ({ ...all, [id]: [] }));
+      setImageNotices((all) => ({ ...all, [id]: "" }));
+      patchSession(id, (session) => ({ ...session, draft: "" }));
+      return;
+    }
+    await runTurn(id, prompt, images);
+  }
+
+  async function runTurn(id: string, prompt: string, images: DraftImage[], preserveDraft = false) {
+    const current = sessions.find((session) => session.id === id);
+    if (!current || current.sending) return;
     const assistantId = crypto.randomUUID();
     const projectPath = current.projectPath;
     const startedAt = Date.now();
-    const autoTitle = current.title.startsWith("新任务") ? (prompt.length > 22 ? `${prompt.slice(0, 22)}…` : prompt) : null;
-    patchSession(id, (session) => ({ ...session, title: autoTitle || session.title, draft: "", sending: true, messages: [
+    const titleSource = prompt || `分析 ${images.length} 张图片`;
+    const autoTitle = current.title.startsWith("新任务") ? (titleSource.length > 22 ? `${titleSource.slice(0, 22)}…` : titleSource) : null;
+    const messageImages = images.map(({ id: imageId, name, mediaType, dataUrl }) => ({ id: imageId, name, mediaType, dataUrl }));
+    if (!preserveDraft) {
+      setDraftImages((all) => ({ ...all, [id]: [] }));
+      setImageNotices((all) => ({ ...all, [id]: "" }));
+    }
+    patchSession(id, (session) => ({ ...session, title: autoTitle || session.title, draft: preserveDraft ? session.draft : "", sending: true, messages: [
       ...session.messages,
-      { id: crypto.randomUUID(), role: "user", body: prompt },
+      { id: crypto.randomUUID(), role: "user", body: prompt, images: messageImages },
       { id: assistantId, role: "assistant", body: "", processOpen: true, timeline: [{ kind: "thinking", title: "启动 Claude Code", detail: "建立独立流式会话", state: "running" }] },
     ] }));
 
@@ -812,7 +1196,7 @@ export default function Home() {
     try {
       const response = await fetch(api("/api/run"), {
         method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
-        body: JSON.stringify({ prompt, cwd: projectPath, model: current.model, permissionMode: current.permissionMode, effort: current.effort, sessionId: current.claudeSessionId, requestId: id }),
+        body: JSON.stringify({ prompt, images: images.map(({ name, mediaType, data }) => ({ name, mediaType, data })), cwd: projectPath, model: current.model, permissionMode: current.permissionMode, effort: current.effort, sessionId: current.claudeSessionId, requestId: id }),
       });
       if (!response.ok || !response.body) throw new Error(await response.text() || "本地桥没有返回数据");
       const reader = response.body.getReader();
@@ -894,9 +1278,93 @@ export default function Home() {
     }
   }
 
-  function stopSession(id: string) {
+  function removeQueuedTurn(sessionId: string, turnId: string) {
+    setQueuedTurns((current) => ({ ...current, [sessionId]: (current[sessionId] || []).filter((turn) => turn.id !== turnId) }));
+  }
+
+  function restoreQueuedTurn(sessionId: string, turnId: string) {
+    const turn = (queuedTurns[sessionId] || []).find((item) => item.id === turnId);
+    if (!turn) return;
+    patchSession(sessionId, (session) => ({ ...session, draft: [session.draft.trim(), turn.body].filter(Boolean).join("\n") }));
+    setDraftImages((current) => ({ ...current, [sessionId]: [...(current[sessionId] || []), ...turn.images].slice(0, MAX_IMAGES_PER_MESSAGE) }));
+    removeQueuedTurn(sessionId, turnId);
+  }
+
+  function openQueuedTurnInSideChat(sessionId: string, turnId: string) {
+    const turn = (queuedTurns[sessionId] || []).find((item) => item.id === turnId);
+    const source = sessions.find((session) => session.id === sessionId);
+    if (!turn || !source || turn.state === "steering" || turn.state === "steered") return;
+    const newId = crypto.randomUUID();
+    const summary = turn.body.trim().replace(/\s+/g, " ");
+    const nextSession: Session = {
+      ...makeSession(newId, summary.slice(0, 28) || `图片任务 ${turn.images.length}`, source.projectPath),
+      model: source.model,
+      permissionMode: source.permissionMode,
+      effort: source.effort,
+      draft: turn.body,
+    };
+    setSessions((current) => [nextSession, ...current]);
+    setDraftImages((current) => ({ ...current, [newId]: turn.images }));
+    removeQueuedTurn(sessionId, turnId);
+    setVisibleIds((current) => [...current.filter((id) => id !== sessionId && id !== newId).slice(-1), sessionId, newId]);
+    setActiveId(newId);
+    setMobileSidebar(false);
+  }
+
+  async function steerQueuedTurn(sessionId: string, turnId: string) {
+    const turn = (queuedTurns[sessionId] || []).find((item) => item.id === turnId);
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!turn || !session?.sending || turn.state === "steering" || turn.state === "steered") return;
+    if ((status.bridgeProtocol || 0) < REQUIRED_BRIDGE_PROTOCOL || !status.capabilities?.includes("live-steering")) {
+      setImageNotices((current) => ({ ...current, [sessionId]: "当前后台不支持实时插话，请重新启动 Claude Code White。" }));
+      return;
+    }
+    setQueuedTurns((current) => ({ ...current, [sessionId]: (current[sessionId] || []).map((item) => item.id === turnId ? { ...item, state: "steering" } : item) }));
+    try {
+      const response = await fetch(api("/api/steer"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId: sessionId, prompt: turn.body, images: turn.images.map(({ name, mediaType, data }) => ({ name, mediaType, data })) }),
+      });
+      const payload = await response.json().catch(() => null) as { steered?: boolean; acknowledged?: boolean; error?: string } | null;
+      if (!response.ok || !payload?.steered || !payload.acknowledged) throw new Error(payload?.error || "Claude Code 未确认调整方向");
+      patchSession(sessionId, (current) => ({ ...current, messages: current.messages.map((message) => message.role === "assistant" && message.processOpen ? { ...message, timeline: [...(message.timeline || []), { kind: "thinking", title: "已立即调整方向", detail: turn.body || `已接收 ${turn.images.length} 张图片`, state: "done" }] } : message) }));
+      removeQueuedTurn(sessionId, turnId);
+      setImageNotices((current) => ({ ...current, [sessionId]: "" }));
+    } catch (error) {
+      setQueuedTurns((current) => ({ ...current, [sessionId]: (current[sessionId] || []).map((item) => item.id === turnId ? { ...item, state: "queued" } : item) }));
+      setImageNotices((current) => ({ ...current, [sessionId]: error instanceof Error ? error.message : "实时插话发送失败，已保留在队列中。" }));
+    }
+  }
+
+  useEffect(() => {
+    for (const session of sessions) {
+      const sessionQueue = queuedTurns[session.id] || [];
+      if (!session.sending && sessionQueue.some((turn) => turn.state === "steered")) {
+        setQueuedTurns((current) => ({ ...current, [session.id]: (current[session.id] || []).filter((turn) => turn.state !== "steered") }));
+      }
+      const next = sessionQueue.find((turn) => !turn.state || turn.state === "queued");
+      if (!next || session.sending || queueLaunchingRef.current.has(session.id)) continue;
+      queueLaunchingRef.current.add(session.id);
+      setQueuedTurns((current) => ({ ...current, [session.id]: (current[session.id] || []).filter((turn) => turn.id !== next.id) }));
+      void runTurn(session.id, next.body, next.images, true).finally(() => queueLaunchingRef.current.delete(session.id));
+    }
+  // This queue pass deliberately launches the runTurn snapshot associated with this render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queuedTurns, sessions]);
+
+  async function stopSession(id: string) {
+    if (stoppingSessionIds.has(id)) return;
+    setStoppingSessionIds((current) => new Set(current).add(id));
     aborters.current.get(id)?.abort();
-    fetch(api("/api/cancel"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requestId: id }) }).catch(() => undefined);
+    try {
+      const response = await fetch(api("/api/cancel"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requestId: id }) });
+      if (!response.ok) throw new Error("停止请求未被后台接受");
+    } catch (error) {
+      setImageNotices((current) => ({ ...current, [id]: error instanceof Error ? error.message : "停止任务失败" }));
+    } finally {
+      setStoppingSessionIds((current) => { const next = new Set(current); next.delete(id); return next; });
+    }
   }
 
   async function refreshUsage() {
@@ -1016,35 +1484,39 @@ export default function Home() {
   const deepseekTokenMax = Math.max(1, ...(deepseekAnalytics?.models.map((item) => item.tokens) || [1]));
   const connectionLabel = !status.bridge ? "本地桥未启动" : !status.claudeInstalled ? "未检测到 Claude Code" : status.claudeVersion || "Claude Code 已连接";
 
-  return <main className="app-shell">
+  return <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
     <aside className={`sidebar ${mobileSidebar ? "mobile-open" : ""}`}>
-      <div className="brand-row"><ClaudeMark/><div className="brand-copy"><strong>Claude Code</strong><span>Desktop</span></div><IconButton label="收起侧栏" onClick={() => setMobileSidebar(false)}>⌁</IconButton></div>
-      <button className="new-session" onClick={newSession}><span>＋</span> 新建任务 <kbd>Ctrl K</kbd></button>
+      <div className="brand-row"><ClaudeMark/><div className="brand-copy"><strong>Claude Code</strong><span>Desktop</span></div><SidebarToggle expanded onClick={closeSidebar} placement="sidebar"/></div>
+      <button className="new-session" onClick={newSession}><span><UiIcon name="plus"/></span> 新建任务 <kbd>Ctrl K</kbd></button>
       <nav className="primary-nav" aria-label="主导航">
-        <button className="active"><span>◫</span>会话</button><button className={searchOpen ? "active" : ""} onClick={() => setSearchOpen((value) => !value)}><span>⌕</span>搜索</button><button onClick={() => void openHistory()}><span>↶</span>历史任务</button><button onClick={() => { setInspector(true); setInspectorTab("files"); }}><span>◇</span>文件</button><button onClick={() => { setInspector(true); setInspectorTab("changes"); }}><span>↕</span>变更</button>
+        <button className="active"><span><UiIcon name="chat"/></span>会话</button><button className={searchOpen ? "active" : ""} onClick={() => setSearchOpen((value) => !value)}><span><UiIcon name="search"/></span>搜索</button><button onClick={() => void openHistory()}><span><UiIcon name="history"/></span>历史任务</button><button onClick={() => { setInspector(true); setInspectorTab("files"); }}><span><UiIcon name="folder"/></span>文件</button><button onClick={() => { setInspector(true); setInspectorTab("changes"); }}><span><UiIcon name="changes"/></span>变更</button>
       </nav>
       {searchOpen && <div className="session-search"><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索任务或目录…" autoFocus/></div>}
-      <div className="section-label"><span>最近任务</span><small>{visibleSessions.length}</small></div>
-      <div className="session-list">{visibleSessions.map((session) => (
-        <div className={`session ${activeId === session.id ? "active" : ""}`} key={session.id}>
-          <button onClick={() => openSession(session.id)}><span className="session-title">{session.title}</span><small>{session.sending ? "正在工作" : session.model}</small></button>
-          <span className="session-actions">
-            <button className="split-open" title="并排打开" aria-label={`并排打开 ${session.title}`} onClick={() => openSession(session.id, true)}>▥</button>
-            <button className="session-action" title="重命名" aria-label={`重命名 ${session.title}`} onClick={() => renameSession(session.id)}>✎</button>
-            <button className="session-action danger" title="删除" aria-label={`删除 ${session.title}`} disabled={sessions.length === 1} onClick={() => deleteSession(session.id)}>×</button>
-          </span>
-        </div>
-      ))}</div>
+      <div className="section-label"><span>工作区任务</span><small>{visibleSessions.length}</small></div>
+      <div className="session-list">{workspaceSessionGroups.map((group) => <section className="workspace-session-group" key={group.key}>
+        <header title={group.path || "尚未选择目录"}><span className="workspace-folder-icon"><UiIcon name="workspace" size={13}/></span><strong>{group.label}</strong><small>{group.sessions.length}</small></header>
+        <div>{group.sessions.map((session) => (
+          <div className={`session ${activeId === session.id ? "active" : ""}`} key={session.id}>
+            <button onClick={() => openSession(session.id)}><span className="session-title">{session.title}</span><small>{session.sending ? "正在工作" : `${session.model}${(queuedTurns[session.id]?.length || 0) ? ` · 排队 ${queuedTurns[session.id].length}` : ""}`}</small></button>
+            <span className="session-actions">
+              <button className="split-open" title="并排打开" aria-label={`并排打开 ${session.title}`} onClick={() => openSession(session.id, true)}><UiIcon name="split" size={14}/></button>
+              <button className="session-action" title="重命名" aria-label={`重命名 ${session.title}`} onClick={() => renameSession(session.id)}><UiIcon name="edit" size={13}/></button>
+              <button className="session-action danger" title="删除" aria-label={`删除 ${session.title}`} disabled={sessions.length === 1} onClick={() => deleteSession(session.id)}><UiIcon name="trash" size={13}/></button>
+            </span>
+          </div>
+        ))}</div>
+      </section>)}</div>
       <div className="sidebar-bottom">
-        <button className="usage-button" onClick={showUsage}><span className="usage-ring">{localUsage.input + localUsage.output > 0 ? "●" : "○"}</span><span><strong>用量与额度</strong><small>{localUsage.input + localUsage.output > 0 ? `${(localUsage.input + localUsage.output).toLocaleString()} tokens` : "Claude · DeepSeek · OpenAI"}</small></span><b>›</b></button>
-        <button className="project-button" onClick={() => chooseProject(activeId)}><span className="project-icon">{active?.projectPath.match(/^[A-Za-z]:/)?.[0] || "WS"}</span><span><strong>{active?.projectPath.split(/[\\/]/).filter(Boolean).pop() || "工作区"}</strong><small>{active?.projectPath}</small></span><b>⌄</b></button>
+        <button className="usage-button" onClick={showUsage}><span className="usage-ring"><UiIcon name="usage" size={16}/></span><span><strong>用量与额度</strong><small>{localUsage.input + localUsage.output > 0 ? `${(localUsage.input + localUsage.output).toLocaleString()} tokens` : "Claude · DeepSeek · OpenAI"}</small></span><b>›</b></button>
+        <button className="project-button" disabled={folderPickingId !== null} onClick={() => void chooseProject(activeId)}><span className="project-icon"><UiIcon name="folder" size={20}/></span><span><strong>{folderPickingId === activeId ? "正在打开文件夹选择器…" : workspaceName(active?.projectPath || "")}</strong><small>{active?.projectPath || "选择工作目录"}</small></span><b className="project-open-label">{folderPickingId === activeId ? "等待选择" : "更换"}<span>›</span></b></button>
         <div className="account-row"><span className="avatar">LH</span><span><strong>Lavinia</strong><small>本地工作区</small></span><IconButton label="切换主题" onClick={() => setTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? "☾" : "☀"}</IconButton></div>
       </div>
     </aside>
+    <button type="button" className={`sidebar-backdrop ${mobileSidebar ? "visible" : ""}`} aria-label="关闭侧栏" onClick={() => setMobileSidebar(false)}/>
 
     <section className="workspace">
       <header className="topbar">
-        <div className="topbar-title"><IconButton label="打开侧栏" onClick={() => setMobileSidebar(true)}>☰</IconButton><div><strong>{active?.title}</strong><span>{visibleIds.length} 个并行会话 · {active?.projectPath}</span></div></div>
+        <div className="topbar-title"><SidebarToggle expanded={false} onClick={openSidebar} placement="topbar"/><div><strong>{active?.title}</strong><span>{visibleIds.length} 个并行会话 · {active?.projectPath}</span></div></div>
         <div className="topbar-actions">{!status.bridge && <><button className="bridge-start" disabled={bridgeStarting} onClick={() => void startBridge()}>{bridgeStarting ? "启动中…" : "一键桥接"}</button><button className="connection-retry" title="桥接未就绪时点击重新检测" onClick={() => void recheckStatus()}>↻</button></>}<span className={`connection ${status.claudeInstalled ? "online" : ""}`}><i/>{connectionLabel}</span><button className="command-trigger" onClick={() => { setCommandQuery(""); setCommandSelected(0); setCommandOpen(true); }} title="快捷操作（Ctrl+Shift+P）"><span>⌕</span><kbd>Ctrl ⇧ P</kbd></button><div className="layout-switch" aria-label="会话布局"><button onClick={() => setVisibleIds([activeId])}>▢</button><button className={visibleIds.length === 2 ? "active" : ""} onClick={() => setVisibleIds((current) => (current.length >= 2 ? current.slice(0, 2) : current))}>▥</button><button className={visibleIds.length === 3 ? "active" : ""} onClick={() => setVisibleIds((current) => (current.length >= 3 ? current.slice(0, 3) : current))}>▦</button></div><IconButton label="检查面板" active={inspector} onClick={() => setInspector((value) => !value)}>◧</IconButton></div>
       </header>
 
@@ -1052,17 +1524,38 @@ export default function Home() {
         <div className={`session-grid columns-${visibleIds.length}`}>{visibleIds.map((id) => {
           const session = sessions.find((item) => item.id === id);
           if (!session) return null;
+          const sessionDraftImages = draftImages[id] || [];
+          const hasDraftContent = Boolean(session.draft.trim() || sessionDraftImages.length);
           return <section className={`session-pane ${activeId === id ? "active" : ""}`} key={id} onDragOver={(event) => event.preventDefault()} onDrop={() => movePane(id)} onClick={() => setActiveId(id)}>
             <header className="pane-header" draggable onDragStart={() => setDraggedId(id)}><span className={`run-dot ${session.sending ? "busy" : ""}`}/><div><strong>{session.title}</strong><small>{session.projectPath}</small></div><span className="pane-model">{session.model}</span>{visibleIds.length > 1 && <IconButton label="关闭此窗格" onClick={() => closePane(id)}>×</IconButton>}</header>
             <div className="conversation" ref={(element) => { conversationRefs.current.set(id, element); }} onScroll={() => handlePaneScroll(id)}><div className="conversation-inner">
               <div className="day-divider"><span>今天</span></div>
-              {session.messages.map((message) => message.role === "user" ? <article className="message user-message" key={message.id}><div className="user-bubble">{message.body}</div></article> : <article className="message assistant-message" key={message.id}><ClaudeMark small/><div className="assistant-content"><div className="message-meta"><strong>Claude</strong><span>Code</span>{message.usage && (message.usage.input + message.usage.output) > 0 && <span className="message-tokens" title={`输入 ${message.usage.input.toLocaleString()} · 输出 ${message.usage.output.toLocaleString()} · 缓存 ${message.usage.cache.toLocaleString()}${message.usage.cost > 0 ? ` · $${message.usage.cost.toFixed(4)}` : ""}`}>▲{formatTokens(message.usage.input)} ▼{formatTokens(message.usage.output)}</span>}{message.elapsedMs !== undefined && <span className="message-elapsed">⏱ {formatElapsed(message.elapsedMs)}</span>}</div>
+              {session.messages.map((message) => message.role === "user" ? <article className="message user-message" key={message.id}><div className="user-message-content">{message.images && message.images.length > 0 && <div className={`message-image-grid ${message.images.length === 1 ? "single" : "multiple"}`}>{message.images.map((image) => <button type="button" className="message-image" key={image.id} title={`查看 ${image.name}`} onClick={() => setPreviewImage(image)}><img src={image.dataUrl} alt={image.name}/></button>)}</div>}{message.body && <div className="user-bubble">{message.body}</div>}</div></article> : <article className="message assistant-message" key={message.id}><ClaudeMark small/><div className="assistant-content"><div className="message-meta"><strong>Claude</strong><span>Code</span>{message.usage && (message.usage.input + message.usage.output) > 0 && <span className="message-tokens" title={`输入 ${message.usage.input.toLocaleString()} · 输出 ${message.usage.output.toLocaleString()} · 缓存 ${message.usage.cache.toLocaleString()}${message.usage.cost > 0 ? ` · $${message.usage.cost.toFixed(4)}` : ""}`}>▲{formatTokens(message.usage.input)} ▼{formatTokens(message.usage.output)}</span>}{message.elapsedMs !== undefined && <span className="message-elapsed">⏱ {formatElapsed(message.elapsedMs)}</span>}</div>
                 {message.body && <p>{message.body}</p>}
                 <ProcessFlow message={message} onToggle={() => patchSession(id, (item) => ({ ...item, messages: item.messages.map((entry) => entry.id === message.id ? { ...entry, processOpen: !entry.processOpen } : entry) }))}/>
               </div></article>)}
               {session.sending && <div className="working"><span/><span/><span/> Claude 正在工作</div>}
             </div></div>
-            <form className="composer-wrap" onSubmit={(event) => submit(event, id)}><div className="composer"><textarea value={session.draft} onChange={(event) => patchSession(id, (item) => ({ ...item, draft: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="让 Claude 修改代码、运行命令或解释项目…" rows={2}/><div className="composer-toolbar"><div className="toolbar-left"><button type="button" className="add-context" title="附加上下文：项目路径与当前 Git 状态" aria-label="附加上下文" onClick={() => addContext(id)}>＋</button><ModelControl value={session.model} onChange={(model) => patchSession(id, (item) => ({ ...item, model }))}/><PermissionControl value={session.permissionMode} sending={session.sending} onChange={(permissionMode) => patchSession(id, (item) => ({ ...item, permissionMode }))}/><EffortControl value={session.effort} sending={session.sending} onChange={(effort) => patchSession(id, (item) => ({ ...item, effort }))}/></div>{session.sending ? <button type="button" className="stop-button" onClick={() => stopSession(id)}>■</button> : <button className="send-button" disabled={!session.draft.trim()} aria-label="发送">↑</button>}</div></div></form>
+            <form className={`composer-wrap ${imageDragSessionId === id ? "image-dragging" : ""}`} onSubmit={(event) => submit(event, id)} onDragEnter={(event) => handleImageDrag(event, id)} onDragOver={(event) => handleImageDrag(event, id)} onDragLeave={(event) => handleImageDragLeave(event, id)} onDrop={(event) => handleImageDrop(event, id)}>
+              {(queuedTurns[id]?.length || 0) > 0 && <div className="queued-turns" aria-label={`${queuedTurns[id].length} 条排队消息`}>{queuedTurns[id].map((turn, index) => {
+                const queueBusy = turn.state === "steering" || turn.state === "steered";
+                return <article className={`queued-turn state-${turn.state || "queued"}`} key={turn.id}>
+                  <span className="queue-turn-marker" aria-hidden="true">↳</span>
+                  {turn.images.length > 0 && <span className="queued-inline-image" title={`${turn.images.length} 张图片`}><img src={turn.images[0].dataUrl} alt={turn.images[0].name}/>{turn.images.length > 1 && <b>+{turn.images.length - 1}</b>}</span>}
+                  <div className="queued-copy"><p title={turn.body || `发送 ${turn.images.length} 张图片`}>{turn.body || `发送 ${turn.images.length} 张图片`}</p>{index > 0 && <small>排队 {index + 1}</small>}</div>
+                  <div className="queued-actions">
+                    <button type="button" className="steer-action" disabled={queueBusy} title="中断当前步骤，让 Claude 立即按这条消息调整方向" onClick={() => void steerQueuedTurn(id, turn.id)}><span>↳</span><em>{turn.state === "steering" ? "正在插入" : turn.state === "steered" ? "已转向" : "调整方向"}</em></button>
+                    <button type="button" className="queued-icon-action" title="删除这条排队消息" aria-label="删除这条排队消息" onClick={() => removeQueuedTurn(id, turn.id)}><UiIcon name="trash" size={15}/></button>
+                    <details className="queued-more"><summary aria-label="更多排队操作" title="更多操作"><span className="queue-kebab" aria-hidden="true"><i/><i/><i/></span></summary><div className="queued-menu-popover">
+                      <button type="button" disabled={queueBusy} onClick={() => restoreQueuedTurn(id, turn.id)}><UiIcon name="edit" size={16}/><span>编辑消息</span></button>
+                      <button type="button" disabled={queueBusy} onClick={() => openQueuedTurnInSideChat(id, turn.id)}><UiIcon name="split" size={16}/><span>在侧边会话中打开</span></button>
+                      <button type="button" onClick={() => removeQueuedTurn(id, turn.id)}><span className="queue-close-glyph" aria-hidden="true">↳</span><span>关闭排队</span></button>
+                    </div></details>
+                  </div>
+                </article>;
+              })}</div>}
+              <div className="composer">{imageDragSessionId === id && <div className="composer-drop-overlay"><span><UiIcon name="plus"/></span><strong>松开以添加多张图片</strong><small>JPG、PNG、GIF、WebP</small></div>}{sessionDraftImages.length > 0 && <div className="draft-image-rail" aria-label={`已添加 ${sessionDraftImages.length} 张图片`}>{sessionDraftImages.map((image) => <div className="draft-image" key={image.id}><button type="button" className="draft-image-preview" title={`查看 ${image.name}`} onClick={() => setPreviewImage(image)}><img src={image.dataUrl} alt={image.name}/></button><button type="button" className="draft-image-remove" aria-label={`移除 ${image.name}`} onClick={() => removeDraftImage(id, image.id)}>×</button></div>)}</div>}<textarea value={session.draft} onChange={(event) => { if (speechSessionIdRef.current === id) cancelVoiceInput(); patchSession(id, (item) => ({ ...item, draft: event.target.value })); }} onPaste={(event) => handleImagePaste(event, id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={session.sending ? "继续输入；发送后可选择立即调整方向…" : sessionDraftImages.length ? "补充说明，或直接发送图片…" : "让 Claude 修改代码、运行命令、解释项目或分析图片…"} rows={2}/>{imageNotices[id] && <div className="image-notice" role="status">{imageNotices[id]}</div>}<div className="composer-toolbar"><div className="toolbar-left"><label className="add-context image-picker" title="上传图片（支持一次选择多张）" aria-label="上传图片"><input type="file" accept={IMAGE_ACCEPT} multiple onChange={(event) => { const files = Array.from(event.currentTarget.files || []); event.currentTarget.value = ""; void addDraftImages(id, files); }}/><span><UiIcon name="plus" size={16}/></span></label><PermissionControl value={session.permissionMode} sending={session.sending} onChange={(permissionMode) => patchSession(id, (item) => ({ ...item, permissionMode }))}/></div><div className="composer-actions"><ClaudeSettingsControl model={session.model} effort={session.effort} sending={session.sending} onModelChange={(model) => patchSession(id, (item) => ({ ...item, model }))} onEffortChange={(effort) => patchSession(id, (item) => ({ ...item, effort }))}/><button type="button" className={`voice-button ${listeningSessionId === id ? "listening" : ""}`} aria-pressed={listeningSessionId === id} title={listeningSessionId === id ? "停止语音输入" : "语音转文字"} aria-label={listeningSessionId === id ? "停止语音输入" : "开始语音转文字"} onClick={() => toggleVoiceInput(id)}><UiIcon name="microphone" size={17}/><span className="voice-listening-dot" aria-hidden="true"/></button>{session.sending ? <>{hasDraftContent && <button className="send-button queue-send" title="加入排队" aria-label="加入排队"><UiIcon name="send" size={15}/></button>}<button type="button" className="stop-button" disabled={stoppingSessionIds.has(id)} title={stoppingSessionIds.has(id) ? "正在停止…" : "停止当前任务"} aria-label={stoppingSessionIds.has(id) ? "正在停止当前任务" : "停止当前任务"} onClick={() => void stopSession(id)}><UiIcon name="stop" size={14}/></button></> : <button className="send-button" disabled={!hasDraftContent} title="发送" aria-label="发送"><UiIcon name="send" size={15}/></button>}</div></div></div>
+            </form>
           </section>;
         })}</div>
 
@@ -1132,6 +1625,9 @@ export default function Home() {
       </div>
     </section>
 
+    {workspaceNotice && <div className="app-toast" role="status"><span>!</span><p>{workspaceNotice}</p><button type="button" aria-label="关闭提示" onClick={() => setWorkspaceNotice("")}>×</button></div>}
+    {previewImage && <div className="image-lightbox" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewImage(null); }}><section role="dialog" aria-modal="true" aria-label={previewImage.name}><header><span title={previewImage.name}>{previewImage.name}</span><button type="button" aria-label="关闭图片预览" onClick={() => setPreviewImage(null)}>×</button></header><img src={previewImage.dataUrl} alt={previewImage.name}/></section></div>}
+
     {commandOpen && <div className="modal-backdrop command-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCommandOpen(false); }}><section className="command-palette" role="dialog" aria-modal="true" aria-label="快捷操作">
       <div className="command-search"><span>⌕</span><input value={commandQuery} onChange={(event) => { setCommandQuery(event.target.value); setCommandSelected(0); }} onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); setCommandSelected((current) => Math.min(filteredCommands.length - 1, current + 1)); } else if (event.key === "ArrowUp") { event.preventDefault(); setCommandSelected((current) => Math.max(0, current - 1)); } else if (event.key === "Enter" && filteredCommands[commandSelected]) runCommand(filteredCommands[commandSelected].id); }} placeholder="输入要执行的操作…" autoFocus/><kbd>Esc</kbd></div>
       <div className="command-list">{filteredCommands.length === 0 ? <div className="command-empty">没有匹配的操作</div> : filteredCommands.map((command, index) => <button type="button" className={index === commandSelected ? "suggested" : ""} key={command.id} onMouseEnter={() => setCommandSelected(index)} onClick={() => runCommand(command.id)}><span className="command-icon">{command.icon}</span><span><strong>{command.label}</strong><small>{command.detail}</small></span>{command.keys && <kbd>{command.keys}</kbd>}</button>)}</div>
@@ -1151,11 +1647,11 @@ export default function Home() {
       <header className="analytics-header"><div><span className="eyebrow">USAGE & COST</span><h2>用量与额度</h2><p>按模型核对请求、Tokens 与费用。密钥始终留在本机。</p></div><IconButton label="关闭" onClick={() => setUsageOpen(false)}>×</IconButton></header>
 
       <div className="provider-accordion-list">
-      <details className="provider-accordion deepseek-interface" open>
-        <summary><div className="provider-summary-main"><div className="provider-logo deepseek">D</div><div><strong>DeepSeek API</strong><span>余额、消费、请求和模型 Tokens</span></div></div><div className="provider-summary-side"><span className="provider-state ready">已连接</span><b>⌄</b></div></summary>
+      <details className="provider-accordion deepseek-interface" open={usageProviderOpen === "deepseek"}>
+        <summary onClick={(event) => { event.preventDefault(); setUsageProviderOpen((current) => current === "deepseek" ? "" : "deepseek"); }}><div className="provider-summary-main"><div className="provider-logo deepseek">D</div><div><strong>DeepSeek API</strong><span>余额、消费、请求和模型 Tokens</span></div></div><div className="provider-summary-side"><span className="provider-state ready">已连接</span><b>⌄</b></div></summary>
         <div className="provider-interface-body">
       <div className="analytics-toolbar" data-usage-part="filters">
-        <label title="DeepSeek 平台快照仅包含近 30 天数据"><span>时间维度</span><select aria-label="时间维度" value="30d"><option value="30d">近 30 天</option></select></label>
+        <div className="time-filter" title="DeepSeek 平台快照仅包含近 30 天数据"><span>时间维度</span><strong>近 30 天</strong></div>
         <label className="filter-note" title="平台快照未提供按 API Key 的拆分数据"><span>API Key</span><em>快照不拆分</em></label>
         <span className="data-source"><i/>{deepseekAnalytics?.sourceLabel || "等待数据"}</span>
         <button className="export-button" onClick={exportDeepSeekUsage} disabled={!deepseekAnalytics}>导出 CSV</button>
@@ -1190,15 +1686,15 @@ export default function Home() {
         </div>
       </details>
 
-      <details className="provider-accordion claude-interface">
-        <summary><div className="provider-summary-main"><div className="provider-logo claude">C</div><div><strong>Claude Code</strong><span>本客户端逐会话模型账本</span></div></div><div className="provider-summary-side"><span className="provider-state ready">本机记录</span><b>⌄</b></div></summary>
+      <details className="provider-accordion claude-interface" open={usageProviderOpen === "claude"}>
+        <summary onClick={(event) => { event.preventDefault(); setUsageProviderOpen((current) => current === "claude" ? "" : "claude"); }}><div className="provider-summary-main"><div className="provider-logo claude">C</div><div><strong>Claude Code</strong><span>本客户端逐会话模型账本</span></div></div><div className="provider-summary-side"><span className="provider-state ready">本机记录</span><b>⌄</b></div></summary>
         <div className="provider-interface-body"><section className="local-ledger" data-usage-part="local"><div><span className="eyebrow">LOCAL LEDGER</span><h3>Claude Code 模型用量</h3><p>来自 Claude Code 返回的真实 Token 与 API 成本，只在这台设备累计。</p></div><div className="ledger-values"><span><b>{(localUsage.input + localUsage.output).toLocaleString()}</b> Tokens</span><span><b>{localUsage.input.toLocaleString()} / {localUsage.output.toLocaleString()}</b> 输入 / 输出</span><span><b>${localUsage.cost.toFixed(4)}</b> API 成本</span></div></section>
           <div className="claude-model-list">{claudeModelUsage.map((item) => <article key={item.model}><div><strong>Claude {item.model}</strong><span>{item.input + item.output > 0 ? "已记录" : "等待首次调用"}</span></div><p><b>{(item.input + item.output).toLocaleString()}</b> Tokens</p><small>输入 {item.input.toLocaleString()} · 输出 {item.output.toLocaleString()} · 缓存 {item.cache.toLocaleString()} · ${item.cost.toFixed(4)}</small></article>)}</div>
         </div>
       </details>
 
-      {providers.filter((provider) => !["deepseek", "claude"].includes(provider.id)).map((provider) => <details className={`provider-accordion ${provider.id}-interface`} key={provider.id}>
-        <summary><div className="provider-summary-main"><div className={`provider-logo ${provider.id}`}>{provider.name.slice(0, 1)}</div><div><strong>{provider.name}</strong><span>{provider.summary}</span></div></div><div className="provider-summary-side"><span className={`provider-state ${provider.state}`}>{provider.configured ? provider.state === "ready" ? "已连接" : "受限" : "未配置"}</span><b>⌄</b></div></summary>
+      {providers.filter((provider) => !["deepseek", "claude"].includes(provider.id)).map((provider) => <details className={`provider-accordion ${provider.id}-interface`} open={usageProviderOpen === provider.id} key={provider.id}>
+        <summary onClick={(event) => { event.preventDefault(); setUsageProviderOpen((current) => current === provider.id ? "" : provider.id); }}><div className="provider-summary-main"><div className={`provider-logo ${provider.id}`}>{provider.name.slice(0, 1)}</div><div><strong>{provider.name}</strong><span>{provider.summary}</span></div></div><div className="provider-summary-side"><span className={`provider-state ${provider.state}`}>{provider.configured ? provider.state === "ready" ? "已连接" : "受限" : "未配置"}</span><b>⌄</b></div></summary>
         <div className="provider-interface-body"><div className="empty-api-interface"><span>API INTERFACE</span><h3>{provider.name} 模型用量</h3><p>{provider.detail || "配置相应的组织级用量密钥后，这里会按模型显示请求、Tokens、缓存和成本。"}</p>{provider.balances?.map((balance) => <div className="balance" key={balance.currency}><b>{balance.currency} {balance.total}</b><span>赠金 {balance.granted || "0"} · 充值 {balance.toppedUp || "0"}</span></div>)}{provider.href && <a href={provider.href} target="_blank" rel="noreferrer">打开官方用量页 ↗</a>}</div></div>
       </details>)}
       </div>

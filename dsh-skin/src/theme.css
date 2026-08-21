@@ -30,6 +30,50 @@ body[data-dsh-claude-code-white] [id=root] {
   overflow: hidden;
 }
 
+/*
+ * Windows 桌面壳使用原生标题栏覆盖层时，右上角 138px 由最小化 / 最大化 /
+ * 关闭按钮占用。better-sidebar 的浮动开关默认 right:10px，会落进这个区域。
+ * 同时为会话标题行保留“原生按钮 + Harness 面板开关”的总宽度，窄窗口下也
+ * 不会让 Session log 与面板开关互相挤压。
+ *
+ * 三种选择器分别覆盖新版桌面标记、现有兼容标记和 Chromium PWA 标题栏模式；
+ * 普通浏览器页面不受影响。class 后缀选择器用来兼容 CSS Modules 哈希更新。
+ */
+html[data-dsh-desktop-platform="win32"] body[data-dsh-claude-code-white],
+body[data-dsh-claude-code-white][data-dsh-title-bar-compat] {
+  --ccw-windows-caption-controls-width: 138px;
+  --ccw-harness-header-tools-width: 60px;
+}
+
+html[data-dsh-desktop-platform="win32"] body[data-dsh-claude-code-white] [data-dsh-panel-host] [class*="_toggleCluster"],
+body[data-dsh-claude-code-white][data-dsh-title-bar-compat] [data-dsh-panel-host] [class*="_toggleCluster"] {
+  top: calc(3px + env(safe-area-inset-top));
+  right: calc(10px + var(--ccw-windows-caption-controls-width));
+}
+
+html[data-dsh-desktop-platform="win32"] body[data-dsh-claude-code-white] header[class*="_header"] > [class*="_titleRow"],
+body[data-dsh-claude-code-white][data-dsh-title-bar-compat] header[class*="_header"] > [class*="_titleRow"] {
+  box-sizing: border-box;
+  padding-right: calc(20px + var(--ccw-windows-caption-controls-width) + var(--ccw-harness-header-tools-width));
+}
+
+@media (display-mode: window-controls-overlay) {
+  body[data-dsh-claude-code-white] {
+    --ccw-windows-caption-controls-width: 138px;
+    --ccw-harness-header-tools-width: 60px;
+  }
+
+  body[data-dsh-claude-code-white] [data-dsh-panel-host] [class*="_toggleCluster"] {
+    top: calc(3px + env(safe-area-inset-top));
+    right: calc(10px + var(--ccw-windows-caption-controls-width));
+  }
+
+  body[data-dsh-claude-code-white] header[class*="_header"] > [class*="_titleRow"] {
+    box-sizing: border-box;
+    padding-right: calc(20px + var(--ccw-windows-caption-controls-width) + var(--ccw-harness-header-tools-width));
+  }
+}
+
 /* 焦点态 / 选区（CCW 珊瑚橙描边） */
 body[data-dsh-claude-code-white] :focus-visible { outline-color: rgba(211, 124, 81, .55); }
 body[data-dsh-claude-code-white] ::selection { background: rgba(211, 124, 81, .22); }
